@@ -1,0 +1,10 @@
+fastapi 
+uvicorn 
+psycopg2-binary 
+sqlalchemy 
+redis 
+neo4j 
+kafka-python 
+elasticsearch 
+clickhouse-connect 
+python-dotenv
