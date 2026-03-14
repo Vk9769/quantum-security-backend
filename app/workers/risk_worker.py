@@ -59,7 +59,7 @@ for message in consumer:
     print("KAFKA MESSAGE RECEIVED:", message.value)
     event = message.value
     event_type = event.get("event_type")
-
+    scan_id = event.get("scan_id")
     # -----------------------------------
     # Vulnerability Events
     # -----------------------------------
@@ -67,7 +67,6 @@ for message in consumer:
 
         asset = event["asset"]
         cve = event["cve"]
-
         graph.add_vulnerability(asset, cve)
 
         logger.info(f"⚠ Vulnerability detected → {asset} {cve}")
@@ -80,7 +79,8 @@ for message in consumer:
                     send_alert(
                         asset,
                         "HIGH",
-                        f"Critical vulnerability {cve} detected"
+                        f"Critical vulnerability {cve} detected",
+                        scan_id
                     )
         db: Session = SessionLocal()
     
@@ -128,10 +128,11 @@ for message in consumer:
         # Send alert if crypto unsafe
         if quantum_risk == "NOT_QUANTUM_SAFE":
 
-            send_alert(
+           send_alert(
                 asset,
                 "MEDIUM",
-                f"Quantum unsafe cryptography detected"
+                f"Quantum unsafe cryptography detected",
+                scan_id
             )
 
         # -----------------------------------

@@ -47,7 +47,7 @@ if __name__ == "__main__":
         logger.warning("No domains found in database")
 
         # fallback test domain
-        domains = ["tesla.com"]
+        domains = ["Giftretail.pnbuat.bank.in"]
 
     for domain in domains:
 

@@ -3,6 +3,8 @@ from datetime import datetime
 import os
 
 from app.api.v1.auth_routes import router as auth_router
+from app.api.v1.employee_routes import router as employee_router
+
 
 # Optional imports for service checks
 from app.db.postgres import engine
@@ -127,4 +129,14 @@ router.include_router(
     auth_router,
     prefix="/auth",
     tags=["Authentication"]
+)
+
+# ============================================
+# EMPLOYEE ROUTES
+# ============================================
+
+router.include_router(
+    employee_router,
+    prefix="/employees",
+    tags=["Employees"]
 )
