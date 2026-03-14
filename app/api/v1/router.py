@@ -2,6 +2,8 @@ from fastapi import APIRouter
 from datetime import datetime
 import os
 
+from app.api.v1.auth_routes import router as auth_router
+
 # Optional imports for service checks
 from app.db.postgres import engine
 from app.db.redis import redis_client
@@ -115,3 +117,14 @@ def services_status():
     "service": "Quantum Security Scanner",
     "timestamp": datetime.utcnow().isoformat()
 }
+    
+    
+    # ============================================
+# AUTH ROUTES
+# ============================================
+
+router.include_router(
+    auth_router,
+    prefix="/auth",
+    tags=["Authentication"]
+)

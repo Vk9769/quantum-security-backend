@@ -59,9 +59,15 @@ app.add_middleware(
 # Startup Event
 # -----------------------------------------------------
 
+from app.db.postgres import Base, engine
+from app.models import user, organization
+
 @app.on_event("startup")
 async def startup_event():
     logger.info("Quantum Security Scanner API starting...")
+
+    # Create tables automatically
+    Base.metadata.create_all(bind=engine)
 
 
 # -----------------------------------------------------
