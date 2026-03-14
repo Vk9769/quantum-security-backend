@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.models.asset_registry import AssetRegistry
 from app.models.certificate import Certificate
 from app.models.cbom import CBOMInventory
+from app.models.pqc import PQCAnalysis
 
 logger = logging.getLogger("PQCService")
 
@@ -63,3 +64,30 @@ def store_cbom(
         db.rollback()
         logger.error("CBOM store failed")
         logger.error(e)
+        
+def update_cbom_quantum_risk(db, asset_id, quantum_risk):
+
+    cbom = db.query(CBOMInventory).filter(
+        CBOMInventory.asset_id == asset_id
+    ).first()
+
+    if cbom:
+        cbom.quantum_risk = quantum_risk
+        db.commit()
+        
+def store_pqc_analysis(db, asset_id, algorithm, pqc_ready):
+
+    upgrade = None
+
+    if not pqc_ready:
+        upgrade = "CRYSTALS-Kyber / Dilithium"
+
+    record = PQCAnalysis(
+        asset_id=asset_id,
+        algorithm=algorithm,
+        pqc_ready=pqc_ready,
+        recommended_upgrade=upgrade
+    )
+
+    db.add(record)
+    db.commit()

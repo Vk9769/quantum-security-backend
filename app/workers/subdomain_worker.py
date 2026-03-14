@@ -1,70 +1,76 @@
 import json
 import logging
-from kafka import KafkaProducer
+from kafka import KafkaConsumer
 from app.db.postgres import SessionLocal
 from app.services.asset_service import store_subdomain
-
 from app.scanners.subdomain_scanner import discover_subdomains
-
-logging.basicConfig(level=logging.INFO)
+from app.workers.kafka_producer import send_asset_discovered
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s - %(message)s",
+    force=True
+)
+logging.getLogger("kafka").setLevel(logging.WARNING)
 logger = logging.getLogger("SubdomainWorker")
 
-
-producer = KafkaProducer(
-    bootstrap_servers="127.0.0.1:9092",
-    value_serializer=lambda v: json.dumps(v).encode("utf-8")
+consumer = KafkaConsumer(
+    "scan-events",
+    bootstrap_servers="localhost:9092",
+    auto_offset_reset="earliest",
+    group_id="subdomain-worker",
+    enable_auto_commit=True,
+    value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )
 
+logger.info("Subdomain Worker Started")
 
-def send_asset(asset, domain):
+ORGANIZATION_ID = "10024715-cd08-49a4-b316-4f394c14d267"
+print("SUBDOMAIN WORKER RUNNING")
+print("Waiting for Kafka messages...")
+for message in consumer:
 
-    event = {
-        "event_type": "asset_discovered",
-        "asset": asset,
-        "domain": domain
-    }
+    print("KAFKA MESSAGE RECEIVED:", message.value)
 
-    producer.send("asset-events", event)
-    producer.flush()
+    try:
 
-    logger.info(f"Asset sent → {asset}")
+        event = message.value
 
-
-if __name__ == "__main__":
-
-    target = "tesla.com"
-
-    logger.info(f"Starting subdomain scan → {target}")
-
-    subdomains = discover_subdomains(target)
-
-    logger.info(f"Discovered {len(subdomains)} subdomains")
-    
-    ORGANIZATION_ID = "10024715-cd08-49a4-b316-4f394c14d267"
-
-    db = SessionLocal()
-
-    for sub in subdomains:
-
-        sub = sub.lower().strip()
-
-        if "*" in sub:
+        if event["event_type"] != "scan_started":
             continue
+        scan_id = event.get("scan_id")
+        target = event["domain"]
 
-        if " " in sub or "/" in sub:
-            continue
+        logger.info(f"Starting subdomain scan → {target}")
 
-        print("FOUND:", sub)
+        subdomains = list(set(discover_subdomains(target)))
 
-        store_subdomain(
-            db,
-            ORGANIZATION_ID,
-            target,
-            sub
-        )
+        logger.info(f"Discovered {len(subdomains)} subdomains")
 
-        send_asset(sub, target)
+        db = SessionLocal()
 
-    db.close()
-    
-    producer.close()
+        for sub in subdomains:
+
+            sub = sub.lower().strip()
+
+            if "*" in sub:
+                continue
+
+            if " " in sub or "/" in sub:
+                continue
+
+            sub_record = store_subdomain(db, ORGANIZATION_ID, target, sub)
+
+            if sub_record:
+                scan_id = event.get("scan_id")
+
+                send_asset_discovered(
+                    sub,
+                    target,
+                    scan_id
+                )
+
+        db.close()
+
+    except Exception as e:
+        logger.error("Subdomain worker crashed")
+        logger.error(e)

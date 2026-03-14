@@ -4,7 +4,12 @@ from kafka import KafkaConsumer
 from app.services.graph_service import GraphService
 
 graph = GraphService()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s - %(message)s",
+    force=True
+)
+logging.getLogger("kafka").setLevel(logging.WARNING)
 logger = logging.getLogger("KafkaConsumer")
 
 consumer = KafkaConsumer(
@@ -15,18 +20,18 @@ consumer = KafkaConsumer(
     "alert-events",
     "port-scan-events",
     "drift-alerts",
-    bootstrap_servers="127.0.0.1:9092",
+    bootstrap_servers="localhost:9092",
     auto_offset_reset="earliest",
-    enable_auto_commit=False,
-    group_id=None,
+    enable_auto_commit=True,
+    group_id="kafka-consumer",
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )
 
 logger.info("Kafka consumer started")
-
+print("Waiting for Kafka messages...")
 
 for message in consumer:
-    
+    print("KAFKA MESSAGE RECEIVED:", message.value)
     print(
         f"TOPIC={message.topic} "
         f"PARTITION={message.partition} "
