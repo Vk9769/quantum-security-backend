@@ -105,13 +105,20 @@ class GraphService:
         
     def add_cbom(self, asset, algo, key, expiry):
 
+        # Replace None values
+        algo = algo or "unknown"
+        key = key or 0
+        expiry = expiry or "unknown"
+
         query = """
         MATCH (a:Asset {name:$asset})
+
         MERGE (cb:CBOM {
             algorithm:$algo,
             key_size:$key,
             expiry:$expiry
         })
+
         MERGE (a)-[:HAS_CBOM]->(cb)
         """
 

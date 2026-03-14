@@ -4,8 +4,12 @@ from kafka import KafkaConsumer
 from app.services.graph_service import GraphService
 
 graph = GraphService()
-
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s - %(message)s",
+    force=True
+)
+logging.getLogger("kafka").setLevel(logging.WARNING)
 logger = logging.getLogger("ScanWorker")
 
 consumer = KafkaConsumer(
@@ -15,23 +19,23 @@ consumer = KafkaConsumer(
     "tls-events",
     "certificate-events",
     "cbom-events",
-    bootstrap_servers="127.0.0.1:9092",
+    bootstrap_servers="localhost:9092",
     auto_offset_reset="earliest",
-    group_id=None,
-    enable_auto_commit=False,
+    group_id="scan-worker",
+    enable_auto_commit=True,
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )
 
 logger.info("Scan Worker Started")
-
+        
 def extract_domain(hostname):
     parts = hostname.split(".")
     if len(parts) >= 2:
         return ".".join(parts[-2:])
     return hostname
-
+print("Waiting for Kafka messages...")
 for message in consumer:
-
+    print("KAFKA MESSAGE RECEIVED:", message.value)
     event = message.value
     print("EVENT RECEIVED:", event)
     event_type = event.get("event_type")
@@ -106,7 +110,7 @@ for message in consumer:
         )
         graph.add_cbom(
             event["asset"],
-            event["signature_algorithm"],
-            event["key_size"],
-            event["expiry"]
+            event.get("signature_algorithm"),
+            event.get("key_size"),
+            event.get("expiry")
         )

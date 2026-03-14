@@ -48,6 +48,28 @@ def store_subdomain(
         ).first()
 
         if existing_sub:
+
+            # Ensure asset exists in registry
+            asset = db.query(AssetRegistry).filter(
+                AssetRegistry.asset_identifier == subdomain
+            ).first()
+
+            if not asset:
+
+                asset = AssetRegistry(
+                    organization_id=organization_id,
+                    asset_identifier=subdomain,
+                    asset_type="subdomain",
+                    first_seen=datetime.utcnow(),
+                    last_seen=datetime.utcnow(),
+                    status="active"
+                )
+
+                db.add(asset)
+                db.commit()
+
+                logger.info(f"Asset registry entry created → {subdomain}")
+
             return existing_sub
 
         new_sub = Subdomain(
@@ -67,7 +89,6 @@ def store_subdomain(
         # -------------------------
 
         asset = AssetRegistry(
-            id=new_sub.id,                 # SAME ID AS SUBDOMAIN
             organization_id=organization_id,
             asset_identifier=subdomain,
             asset_type="subdomain",
@@ -75,7 +96,6 @@ def store_subdomain(
             last_seen=datetime.utcnow(),
             status="active"
         )
-
         db.add(asset)
         db.commit()
 

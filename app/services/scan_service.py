@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 from datetime import date
-
+import time
 from app.models.asset_registry import AssetRegistry
 from app.models.scan import PortScanResult
 from app.models.certificate import Certificate
@@ -25,10 +25,10 @@ def store_port_scan_result(
             AssetRegistry.asset_identifier == asset_hostname
         ).first()
 
+        asset = get_asset(db, asset_hostname)
+
         if not asset:
-            logger.warning(f"Asset not found → {asset_hostname}")
             return
-        
         existing = db.query(PortScanResult).filter(
             PortScanResult.asset_id == asset.id,
             PortScanResult.port == port
@@ -72,8 +72,9 @@ def store_certificate_result(
             AssetRegistry.asset_identifier == asset_hostname
         ).first()
 
+        asset = get_asset(db, asset_hostname)
+
         if not asset:
-            logger.warning(f"❌ Asset not found in DB → {asset_hostname}")
             return
         else:
             logger.info(f"✅ Asset found → {asset_hostname}")
@@ -107,3 +108,23 @@ def store_certificate_result(
         db.rollback()
         logger.error("Failed to store certificate")
         logger.error(e)
+        
+def get_asset(db: Session, hostname: str):
+
+    asset = None
+
+    for _ in range(5):
+
+        asset = db.query(AssetRegistry).filter(
+            AssetRegistry.asset_identifier == hostname
+        ).first()
+
+        if asset:
+            return asset
+
+        logger.warning(f"[Retry] Asset not found → {hostname}")
+        time.sleep(1)
+
+    logger.error(f"[Failed] Asset still missing → {hostname}")
+
+    return None
