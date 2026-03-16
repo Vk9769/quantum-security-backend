@@ -184,6 +184,27 @@ CREATE TABLE IF NOT EXISTS public.domains
     CONSTRAINT domains_domain_name_key UNIQUE (domain_name)
 );
 
+CREATE TABLE IF NOT EXISTS public.employees
+(
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    organization_id uuid NOT NULL,
+    first_name character varying(100) COLLATE pg_catalog."default" NOT NULL,
+    last_name character varying(100) COLLATE pg_catalog."default" NOT NULL,
+    email character varying(150) COLLATE pg_catalog."default" NOT NULL,
+    password_hash text COLLATE pg_catalog."default" NOT NULL,
+    role character varying(50) COLLATE pg_catalog."default" DEFAULT 'employee'::character varying,
+    department character varying(100) COLLATE pg_catalog."default",
+    phone character varying(20) COLLATE pg_catalog."default",
+    is_active boolean DEFAULT true,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    "position" character varying(100) COLLATE pg_catalog."default",
+    location character varying(100) COLLATE pg_catalog."default",
+    status character varying(20) COLLATE pg_catalog."default" DEFAULT 'active'::character varying,
+    join_date date,
+    CONSTRAINT employees_pkey PRIMARY KEY (id),
+    CONSTRAINT unique_employee_email_per_company UNIQUE (organization_id, email)
+);
+
 CREATE TABLE IF NOT EXISTS public.event_stream
 (
     id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -302,7 +323,8 @@ CREATE TABLE IF NOT EXISTS public.subdomains
     subdomain text COLLATE pg_catalog."default",
     ip_address inet,
     last_seen timestamp without time zone,
-    CONSTRAINT subdomains_pkey PRIMARY KEY (id)
+    CONSTRAINT subdomains_pkey PRIMARY KEY (id),
+    CONSTRAINT unique_subdomain UNIQUE (subdomain)
 );
 
 CREATE TABLE IF NOT EXISTS public.tls_scan_results
@@ -314,7 +336,8 @@ CREATE TABLE IF NOT EXISTS public.tls_scan_results
     key_exchange text COLLATE pg_catalog."default",
     forward_secrecy boolean,
     scan_time timestamp without time zone,
-    CONSTRAINT tls_scan_results_pkey PRIMARY KEY (id)
+    CONSTRAINT tls_scan_results_pkey PRIMARY KEY (id),
+    CONSTRAINT unique_tls_asset UNIQUE (asset_id)
 );
 
 CREATE TABLE IF NOT EXISTS public.topology_edges
@@ -501,6 +524,13 @@ ALTER TABLE IF EXISTS public.dns_records
 
 ALTER TABLE IF EXISTS public.domains
     ADD CONSTRAINT domains_organization_id_fkey FOREIGN KEY (organization_id)
+    REFERENCES public.organizations (id) MATCH SIMPLE
+    ON UPDATE NO ACTION
+    ON DELETE CASCADE;
+
+
+ALTER TABLE IF EXISTS public.employees
+    ADD CONSTRAINT fk_employee_org FOREIGN KEY (organization_id)
     REFERENCES public.organizations (id) MATCH SIMPLE
     ON UPDATE NO ACTION
     ON DELETE CASCADE;
