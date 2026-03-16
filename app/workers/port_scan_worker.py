@@ -43,6 +43,9 @@ for message in consumer:
 
     event = message.value
 
+    if event.get("event_type") != "asset_discovered":
+        continue
+
     asset = event["asset"]
     scan_id = event.get("scan_id")
 

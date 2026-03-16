@@ -3,6 +3,7 @@ import json
 import time
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
+
 from app.models.cbom import CBOMInventory
 from app.db.postgres import SessionLocal
 from app.scanners.cbom_generator import generate_cbom
@@ -11,11 +12,14 @@ from app.models.asset_registry import AssetRegistry
 from app.models.tls import TLSScanResult
 from app.models.certificate import Certificate
 from app.workers.kafka_producer import send_event
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s - %(message)s",
     force=True
 )
+
 logging.getLogger("kafka").setLevel(logging.WARNING)
 logger = logging.getLogger("CBOMWorker")
 
@@ -33,12 +37,15 @@ consumer = KafkaConsumer(
 logger.info("CBOM Worker Started")
 print("Waiting for Kafka messages...")
 
+
 for message in consumer:
+
     print("KAFKA MESSAGE RECEIVED:", message.value)
+
     event = message.value
     event_type = event.get("event_type")
     scan_id = event.get("scan_id")
-    # Only process TLS or Certificate discoveries
+
     if event_type not in ["certificate_discovered", "tls_scan_result"]:
         continue
 
@@ -46,11 +53,13 @@ for message in consumer:
 
     db: Session = SessionLocal()
 
+    cbom_data = None  # prevent NameError if exception occurs
+
     try:
 
-        # -----------------------------
+        # --------------------------------
         # Fetch asset
-        # -----------------------------
+        # --------------------------------
         asset_record = db.query(AssetRegistry).filter(
             AssetRegistry.asset_identifier == asset
         ).first()
@@ -69,9 +78,9 @@ for message in consumer:
                 logger.warning(f"Asset still missing → {asset}")
                 continue
 
-        # -----------------------------
+        # --------------------------------
         # Fetch TLS data
-        # -----------------------------
+        # --------------------------------
         tls = db.query(TLSScanResult).filter(
             TLSScanResult.asset_id == asset_record.id
         ).order_by(TLSScanResult.scan_time.desc()).first()
@@ -82,41 +91,33 @@ for message in consumer:
             "key_exchange": tls.key_exchange if tls else None
         }
 
-        # -----------------------------
+        # --------------------------------
         # Fetch certificate
-        # -----------------------------
+        # --------------------------------
         cert = db.query(Certificate).filter(
             Certificate.asset_id == asset_record.id
         ).order_by(Certificate.expiry_date.desc()).first()
 
-        if cert:
-            cert_data = {
-                "issuer": cert.issuer if cert else None,
-                "subject": cert.subject if cert else None,
-                "signature_algorithm": cert.signature_algorithm if cert else None,
-                "key_size": cert.key_size if cert else None,
-                "expiry": cert.expiry_date.isoformat() if cert else None
-            }
-        else:
+        cert_data = {
+            "issuer": cert.issuer if cert else None,
+            "subject": cert.subject if cert else None,
+            "signature_algorithm": cert.signature_algorithm if cert else None,
+            "key_size": cert.key_size if cert else None,
+            "expiry": cert.expiry_date.isoformat() if cert and cert.expiry_date else None
+        }
 
-            cert_data = {
-                "issuer": cert.issuer if cert else None,
-                "subject": cert.subject if cert else None,
-                "signature_algorithm": cert.signature_algorithm if cert else None,
-                "key_size": cert.key_size if cert else None,
-                "expiry": cert.expiry_date.isoformat() if cert else None
-            }
-
-        # -----------------------------
+        # --------------------------------
         # Generate CBOM
-        # -----------------------------
+        # --------------------------------
         cbom_data = generate_cbom(
             asset,
             tls=tls_data,
             cert=cert_data
         )
 
-
+        # --------------------------------
+        # Store CBOM
+        # --------------------------------
         existing_cbom = db.query(CBOMInventory).filter(
             CBOMInventory.asset_id == asset_record.id
         ).first()
@@ -144,22 +145,25 @@ for message in consumer:
 
             logger.info(f"CBOM stored → {asset}")
 
+        # --------------------------------
+        # Publish CBOM event
+        # --------------------------------
+        cbom_event = {
+            "scan_id": scan_id,
+            "event_type": "cbom_generated",
+            "asset": asset,
+            **cbom_data
+        }
+
+        send_event("cbom-events", cbom_event, key=asset)
+
+        logger.info(f"CBOM generated → {asset}")
+
     except Exception as e:
+
         logger.error(f"CBOM processing failed → {asset}")
-        logger.error(e)
+        logger.exception(e)
 
     finally:
+
         db.close()
-
-    # -----------------------------
-    # Publish CBOM event
-    # -----------------------------
-    cbom_event = {
-        "scan_id": scan_id,
-        "event_type": "cbom_generated",
-        "asset": asset,
-        **cbom_data
-    }
-    send_event("cbom-events", cbom_event, key=asset)
-
-    logger.info(f"CBOM generated → {asset}")

@@ -70,7 +70,10 @@ class GraphService:
 
         query = """
         MATCH (a:Asset {name:$asset})
-        MERGE (t:TLS {version:$version, cipher:$cipher})
+        MERGE (t:TLS {asset:$asset})
+        SET
+            t.version = $version,
+            t.cipher = $cipher
         MERGE (a)-[:HAS_TLS]->(t)
         """
 
@@ -84,13 +87,17 @@ class GraphService:
 
         query = """
         MATCH (a:Asset {name:$asset})
+
         MERGE (c:Certificate {
             issuer:$issuer,
-            subject:$subject,
-            expiry:$expiry,
-            algorithm:$algo,
-            key_size:$key
+            subject:$subject
         })
+
+        SET
+            c.expiry = $expiry,
+            c.algorithm = $algo,
+            c.key_size = $key
+
         MERGE (a)-[:HAS_CERTIFICATE]->(c)
         """
 

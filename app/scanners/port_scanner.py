@@ -1,56 +1,149 @@
+import subprocess
 import socket
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import re
+import dns.resolver
 
 logger = logging.getLogger("PortScanner")
 
-COMMON_PORTS = [
-21,
-22,
-25,
-80,
-443,
-3306,
-5432,
-6379,
-8080,
-8443
-]
 
+# -----------------------------------
+# DNS Resolver
+# -----------------------------------
 
-def scan_port(host, port):
+def resolve_host(host):
 
     try:
-        ip = socket.gethostbyname(host)
+        answers = dns.resolver.resolve(host, "A", lifetime=5)
+        ip = answers[0].to_text()
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
+        logger.info(f"Resolved {host} → {ip}")
 
-        result = sock.connect_ex((ip, port))
-        sock.close()
+        return ip
 
-        if result == 0:
-            logger.info(f"OPEN → {host}:{port}")
-            return port
+    except Exception as e:
 
-    except Exception:
-        pass
+        logger.warning(f"DNS resolution failed → {host} | {e}")
 
-    return None
+        return None
 
 
-def scan_ports(host):
+# -----------------------------------
+# Masscan (fast scanner)
+# -----------------------------------
 
-    logger.info(f"Starting port scan → {host}")
+def masscan_scan(ip):
+
+    try:
+
+        logger.info(f"Running masscan → {ip}")
+
+        cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "masscan",
+            ip,
+            "-p1-1000",
+            "--rate",
+            "1000"
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+
+        ports = set()
+
+        for line in result.stdout.splitlines():
+
+            match = re.search(r"Discovered open port (\d+)/tcp", line)
+
+            if match:
+                ports.add(int(match.group(1)))
+
+        return sorted(list(ports))
+
+    except subprocess.TimeoutExpired:
+
+        logger.warning("Masscan timeout")
+
+        return []
+
+    except Exception as e:
+
+        logger.warning(f"Masscan failed → {e}")
+
+        return []
+
+
+# -----------------------------------
+# Python fallback scanner
+# -----------------------------------
+
+def python_fallback(ip):
+
+    COMMON_PORTS = [
+        21,22,25,53,80,110,143,443,
+        3306,5432,6379,8080,8443
+    ]
 
     open_ports = []
 
-    with ThreadPoolExecutor(max_workers=50) as executor:
+    for port in COMMON_PORTS:
 
-        results = executor.map(lambda p: scan_port(host, p), COMMON_PORTS)
+        try:
 
-    for port in results:
-        if port:
-            open_ports.append(port)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+
+                sock.settimeout(1)
+
+                result = sock.connect_ex((ip, port))
+
+                if result == 0:
+                    open_ports.append(port)
+
+        except Exception:
+            pass
 
     return open_ports
+
+
+# -----------------------------------
+# Master port scanner
+# -----------------------------------
+
+def scan_ports(host):
+
+    logger.info(f"Starting enterprise port scan → {host}")
+
+    # Resolve domain
+    ip = resolve_host(host)
+
+    if not ip:
+
+        logger.warning(f"Skipping scan (DNS failed) → {host}")
+
+        return []
+
+    # Run masscan
+    ports = masscan_scan(ip)
+
+    if ports:
+
+        logger.info(f"Masscan discovered {len(ports)} open ports")
+
+        return ports
+
+    # Fallback
+    logger.warning("Masscan failed → fallback Python scanner")
+
+    ports = python_fallback(ip)
+
+    if ports:
+        logger.info(f"Python scanner discovered {len(ports)} open ports")
+
+    return ports

@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, UTC
 import time
 from kafka import KafkaConsumer, KafkaProducer
 from sqlalchemy.orm import Session
@@ -19,7 +19,7 @@ logger = logging.getLogger("TLSWorker")
 
 
 consumer = KafkaConsumer(
-    "asset-events",
+    "port-scan-events",
     bootstrap_servers="localhost:9092",
     auto_offset_reset="earliest",
     group_id="tls-worker",
@@ -38,6 +38,12 @@ print("Waiting for Kafka messages...")
 for message in consumer:
     print("KAFKA MESSAGE RECEIVED:", message.value)
     event = message.value
+    
+    if event.get("event_type") != "port_open":
+        continue
+
+    if event.get("port") != 443:
+        continue
 
     asset = event["asset"]
 
@@ -45,22 +51,50 @@ for message in consumer:
  
     logger.info(f"Scanning TLS → {asset}")
 
-    result = scan_tls(asset, port)
+    result = scan_tls(asset)
 
+# If TLS handshake fails still continue pipeline
     if not result:
+
+        logger.warning(f"TLS handshake failed → {asset}")
+
+        tls_event = {
+            "scan_id": event.get("scan_id"),
+            "event_type": "tls_scan_result",
+            "asset": asset,
+            "tls_version": "UNKNOWN",
+            "cipher_suite": "UNKNOWN",
+            "key_exchange": "UNKNOWN",
+            "certificate_issuer": None,
+            "certificate_subject": None,
+            "signature_algorithm": None,
+            "key_size": None
+        }
+
+        producer.send("tls-events", tls_event)
+        producer.flush()
+
+        logger.info(f"TLS fallback event sent → {asset}")
+
         continue
 
     db: Session = SessionLocal()
 
     try:
 
-        asset_record = db.query(AssetRegistry).filter(
-            AssetRegistry.asset_identifier == asset
-        ).first()
-
         asset_record = None
 
         for _ in range(3):
+
+            asset_record = db.query(AssetRegistry).filter(
+                AssetRegistry.asset_identifier == asset
+            ).first()
+
+            if asset_record:
+                break
+
+            logger.warning(f"Asset not found → {asset}, retrying...")
+            time.sleep(2)
 
             asset_record = db.query(AssetRegistry).filter(
                 AssetRegistry.asset_identifier == asset
@@ -85,19 +119,25 @@ for message in consumer:
             existing.tls_version = result["tls_version"]
             existing.cipher_suite = result["cipher_suite"]
             existing.key_exchange = result["key_exchange"]
-            existing.scan_time = datetime.utcnow()
+            existing.scan_time = datetime.now(UTC)
 
             logger.info(f"TLS updated → {asset}")
 
         else:
 
+            forward_secrecy = False
+
+            cipher = result.get("cipher_suite")
+            if cipher:
+                forward_secrecy = "DHE" in cipher
+
             tls_result = TLSScanResult(
                 asset_id=asset_record.id,
-                tls_version=result["tls_version"],
-                cipher_suite=result["cipher_suite"],
-                key_exchange=result["key_exchange"],
-                forward_secrecy="DHE" in result["cipher_suite"],
-                scan_time=datetime.utcnow()
+                tls_version=result.get("tls_version"),
+                cipher_suite=result.get("cipher_suite"),
+                key_exchange=result.get("key_exchange"),
+                forward_secrecy=forward_secrecy,
+                scan_time=datetime.now(UTC)
             )
 
             db.add(tls_result)
@@ -120,11 +160,16 @@ for message in consumer:
         "scan_id": event.get("scan_id"),
         "event_type": "tls_scan_result",
         "asset": asset,
-        "tls_version": result["tls_version"],
-        "cipher_suite": result["cipher_suite"],
-        "key_exchange": result["key_exchange"]
+        "tls_version": result.get("tls_version"),
+        "cipher_suite": result.get("cipher_suite"),
+        "key_exchange": result.get("key_exchange"),
+        "certificate_issuer": result.get("certificate_issuer"),
+        "certificate_subject": result.get("certificate_subject"),
+        "signature_algorithm": result.get("signature_algorithm"),
+        "key_size": result.get("key_size")
     }
 
     producer.send("tls-events", tls_event)
+    producer.flush()
 
     logger.info(f"TLS event sent → {asset}")

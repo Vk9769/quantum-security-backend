@@ -25,7 +25,8 @@ def health():
     return {
         "status": "running",
         "service": "Quantum Security Scanner",
-        "timestamp": datetime.utcnow()
+        "services": services,
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 

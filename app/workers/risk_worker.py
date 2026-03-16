@@ -118,20 +118,30 @@ for message in consumer:
             f"Risk={quantum_risk}"
         )
 
-        if quantum_risk == "NOT_QUANTUM_SAFE":
-            risk_score = calculate_risk_score(quantum=True)
+        if quantum_risk == "CRITICAL":
+            risk_score = calculate_risk_score(base=80, quantum=True)
+
+        elif quantum_risk == "NOT_QUANTUM_SAFE":
+            risk_score = calculate_risk_score(base=40, quantum=True)
+
+        elif quantum_risk == "HYBRID_POST_QUANTUM":
+            risk_score = calculate_risk_score(base=10)
+
+        elif quantum_risk == "POST_QUANTUM_SAFE":
+            risk_score = calculate_risk_score(base=0)
+
         else:
-            risk_score = calculate_risk_score()
+            risk_score = calculate_risk_score(base=5)
 
         logger.info(f"📊 Risk Score → {asset} = {risk_score}")
 
         # Send alert if crypto unsafe
-        if quantum_risk == "NOT_QUANTUM_SAFE":
+        if quantum_risk in ["NOT_QUANTUM_SAFE", "CRITICAL"]:
 
            send_alert(
                 asset,
                 "MEDIUM",
-                f"Quantum unsafe cryptography detected",
+                f"Quantum vulnerable cryptography detected ({quantum_risk})",
                 scan_id
             )
 

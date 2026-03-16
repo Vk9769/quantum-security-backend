@@ -3,10 +3,25 @@ import dns.resolver
 import logging
 import os
 import re
+import socket
+import ipaddress
+
 from app.scanners.asn_scanner import get_asn, get_asn_prefixes
 from app.scanners.reverse_dns_scanner import reverse_dns
 
 logger = logging.getLogger("SubdomainScanner")
+
+
+# -----------------------------
+# Check if target is IP
+# -----------------------------
+def is_ip(target):
+
+    try:
+        ipaddress.ip_address(target)
+        return True
+    except:
+        return False
 
 
 # -----------------------------
@@ -45,6 +60,7 @@ def crtsh_enum(domain):
         return list(subdomains)
 
     except Exception as e:
+
         logger.warning(f"crt.sh failed → {e}")
         return []
 
@@ -73,7 +89,6 @@ def rapiddns_enum(domain):
     except Exception as e:
 
         logger.warning(f"RapidDNS failed → {e}")
-
         return []
 
 
@@ -92,9 +107,7 @@ def virustotal_enum(domain):
 
     url = f"https://www.virustotal.com/api/v3/domains/{domain}/subdomains"
 
-    headers = {
-        "x-apikey": api_key
-    }
+    headers = {"x-apikey": api_key}
 
     try:
 
@@ -112,7 +125,6 @@ def virustotal_enum(domain):
     except Exception as e:
 
         logger.warning(f"VirusTotal failed → {e}")
-
         return []
 
 
@@ -127,18 +139,18 @@ def dns_bruteforce(domain):
         "api","dev","stage","test","mail","vpn","portal","admin",
         "dashboard","app","auth","gateway","cdn","assets","blog",
         "beta","mobile","shop","support","secure","cloud",
-        "login","user","account","data","db","internal",
-        "public","private","media","images","img","static",
-        "docs","download","upload","payments","billing",
-        "store","cart","orders","tracking","services",
-        "edge","global","analytics","metrics"
+        "login","user","account","data","db","internal"
     ]
 
     discovered = []
 
     resolver = dns.resolver.Resolver()
+
     resolver.timeout = 3
     resolver.lifetime = 3
+
+    # fallback DNS servers
+    resolver.nameservers = ["8.8.8.8", "1.1.1.1"]
 
     for sub in wordlist:
 
@@ -159,9 +171,16 @@ def dns_bruteforce(domain):
 # -----------------------------
 # Master discovery function
 # -----------------------------
-def discover_subdomains(domain):
+def discover_subdomains(target):
 
     found = set()
+
+    # If target is IP skip subdomain discovery
+    if is_ip(target):
+
+        logger.info("Target is IP → skipping subdomain enumeration")
+
+        return [target]
 
     sources = [
         crtsh_enum,
@@ -174,9 +193,10 @@ def discover_subdomains(domain):
 
         try:
 
-            results = source(domain)
+            results = source(target)
 
             for sub in results:
+
                 sub = sub.replace("*.", "")
                 found.add(sub.lower())
 
@@ -190,7 +210,7 @@ def discover_subdomains(domain):
 
     try:
 
-        asns = get_asn(domain)
+        asns = get_asn(target)
 
         logger.info(f"Discovered ASNs → {asns}")
 
@@ -198,13 +218,13 @@ def discover_subdomains(domain):
 
             prefixes = get_asn_prefixes(asn)
 
-            for prefix in prefixes[:3]:  # limit scanning
+            for prefix in prefixes[:3]:
 
                 hosts = reverse_dns(prefix)
 
                 for h in hosts:
 
-                    if domain in h:
+                    if target in h:
                         found.add(h.lower())
 
     except Exception as e:

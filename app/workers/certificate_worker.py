@@ -1,4 +1,3 @@
-
 import json
 import logging
 import time
@@ -11,13 +10,17 @@ from app.services.scan_service import store_certificate_result
 from app.models.asset_registry import AssetRegistry
 from app.models.certificate import Certificate
 from app.workers.kafka_producer import send_event
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s - %(message)s",
     force=True
 )
+
 logging.getLogger("kafka").setLevel(logging.WARNING)
+
 logger = logging.getLogger("CertificateWorker")
+
 
 consumer = KafkaConsumer(
     "tls-events",
@@ -29,13 +32,16 @@ consumer = KafkaConsumer(
 )
 
 logger.info("Certificate Worker Started")
-
 print("Waiting for Kafka messages...")
+
+
 for message in consumer:
+
     print("KAFKA MESSAGE RECEIVED:", message.value)
+
     event = message.value
 
-    if event["event_type"] != "tls_scan_result":
+    if event.get("event_type") != "tls_scan_result":
         continue
 
     host = event["asset"].lower().strip()
@@ -51,11 +57,6 @@ for message in consumer:
 
     try:
 
-        # ------------------------------------------------
-        # Check if certificate already exists
-        # ------------------------------------------------
-
-       
         asset = db.query(AssetRegistry).filter(
             AssetRegistry.asset_identifier == host
         ).first()
@@ -63,7 +64,6 @@ for message in consumer:
         if not asset:
 
             logger.warning(f"Asset not found → {host}, retrying...")
-
             time.sleep(2)
 
             asset = db.query(AssetRegistry).filter(
@@ -74,29 +74,56 @@ for message in consumer:
                 logger.warning(f"Asset still missing → {host}")
                 continue
 
-        logger.info(f"Scanning certificate → {host}")
+        logger.info(f"Processing certificate → {host}")
 
-        try:
+        # ------------------------------------------------
+        # 1️⃣ Try certificate from TLS event
+        # ------------------------------------------------
 
-            cert = get_certificate_info(host)
+        cert = None
+
+        if event.get("certificate_subject"):
+
+            cert = {
+                "issuer": event.get("certificate_issuer"),
+                "subject": event.get("certificate_subject"),
+                "signature_algorithm": event.get("signature_algorithm"),
+                "key_size": event.get("key_size"),
+                "expiry": None
+            }
+
+            logger.info("Certificate obtained from TLS scan event")
+
+        # ------------------------------------------------
+        # 2️⃣ Fallback to direct certificate scan
+        # ------------------------------------------------
+
+        else:
+
+            logger.info("TLS event had no certificate → trying direct scan")
+
+            try:
+
+                cert = get_certificate_info(host)
+
+            except Exception:
+                cert = None
 
             if not cert:
-                logger.warning(f"No certificate → {host}")
+                logger.warning(f"No certificate available → {host}")
                 continue
 
-        except Exception as e:
-
-            logger.warning(f"Certificate scan failed → {host}")
-            continue
+        # ------------------------------------------------
+        # Check if certificate already exists
+        # ------------------------------------------------
 
         cert_exists = db.query(Certificate).filter(
             Certificate.asset_id == asset.id,
-            Certificate.signature_algorithm == cert["signature_algorithm"],
-            Certificate.expiry_date == cert["expiry"]
+            Certificate.signature_algorithm == cert.get("signature_algorithm")
         ).first()
 
-
         if cert_exists:
+
             logger.info(f"Certificate already exists → {host}")
             continue
 
@@ -107,31 +134,33 @@ for message in consumer:
         store_certificate_result(
             db,
             asset_hostname=host,
-            issuer=cert["issuer"],
-            subject=cert["subject"],
-            expiry=cert["expiry"],
-            signature_algorithm=cert["signature_algorithm"],
-            key_size=cert["key_size"]
+            issuer=cert.get("issuer"),
+            subject=cert.get("subject"),
+            expiry=cert.get("expiry"),
+            signature_algorithm=cert.get("signature_algorithm"),
+            key_size=cert.get("key_size")
         )
 
         cert_event = {
             "scan_id": event.get("scan_id"),
             "event_type": "certificate_discovered",
             "asset": host,
-            "issuer": cert["issuer"],
-            "subject": cert["subject"],
-            "expiry": cert["expiry"].isoformat(),
-            "signature_algorithm": cert["signature_algorithm"],
-            "key_size": cert["key_size"]
+            "issuer": cert.get("issuer"),
+            "subject": cert.get("subject"),
+            "expiry": cert.get("expiry").isoformat() if cert.get("expiry") else None,
+            "signature_algorithm": cert.get("signature_algorithm"),
+            "key_size": cert.get("key_size")
         }
 
         send_event("certificate-events", cert_event)
 
-        logger.info(f"Certificate extracted → {host}")
+        logger.info(f"Certificate stored → {host}")
 
-    except Exception:
+    except Exception as e:
 
-        logger.warning(f"Certificate scan failed → {host}")
+        logger.error(f"Certificate worker failed → {host}")
+        logger.error(e)
 
     finally:
+
         db.close()

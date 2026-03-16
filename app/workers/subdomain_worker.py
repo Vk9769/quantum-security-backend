@@ -37,34 +37,42 @@ for message in consumer:
 
         if event["event_type"] != "scan_started":
             continue
+
         scan_id = event.get("scan_id")
         target = event["domain"]
 
-        logger.info(f"Starting subdomain scan → {target}")
+        logger.info(f"Starting asset discovery → {target}")
 
-        subdomains = list(set(discover_subdomains(target)))
+        assets = discover_subdomains(target)
 
-        logger.info(f"Discovered {len(subdomains)} subdomains")
+        logger.info(f"Discovered {len(assets)} assets")
+
+        if not assets:
+            assets = [target]
 
         db = SessionLocal()
 
-        for sub in subdomains:
+        for asset in assets:
 
-            sub = sub.lower().strip()
+            asset = asset.lower().strip()
 
-            if "*" in sub:
+            if "*" in asset:
                 continue
 
-            if " " in sub or "/" in sub:
+            if " " in asset or "/" in asset:
                 continue
 
-            sub_record = store_subdomain(db, ORGANIZATION_ID, target, sub)
+            sub_record = store_subdomain(
+                db,
+                ORGANIZATION_ID,
+                target,
+                asset
+            )
 
             if sub_record:
-                scan_id = event.get("scan_id")
 
                 send_asset_discovered(
-                    sub,
+                    asset,
                     target,
                     scan_id
                 )
@@ -72,5 +80,6 @@ for message in consumer:
         db.close()
 
     except Exception as e:
+
         logger.error("Subdomain worker crashed")
         logger.error(e)

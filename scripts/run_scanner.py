@@ -40,14 +40,8 @@ if __name__ == "__main__":
 
     logger.info("Initializing scan pipeline")
 
-    domains = load_domains()
-
-    if not domains:
-
-        logger.warning("No domains found in database")
-
-        # fallback test domain
-        domains = ["Giftretail.pnbuat.bank.in"]
+    # TEST DOMAIN
+    domains = ["Giftretail.pnbuat.bank.in"]
 
     for domain in domains:
 
