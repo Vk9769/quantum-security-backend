@@ -67,6 +67,20 @@ services:
 
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      
+
+
+  masscan:
+    image: quantum_masscan
+    container_name: quantum_masscan
+    network_mode: host
+
+  zgrab:
+    image: ghcr.io/zmap/zgrab2
+    container_name: quantum_zgrab
+
+  openssl:
+    image: frapsoft/openssl
+    container_name: quantum_openssl
+        
 volumes:
   postgres_data:

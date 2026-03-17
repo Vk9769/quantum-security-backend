@@ -2,7 +2,7 @@ import json
 import logging
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, UTC
 
 from app.db.postgres import SessionLocal
 from app.models.alert import Alert
@@ -22,7 +22,7 @@ logger = logging.getLogger("AlertWorker")
 consumer = KafkaConsumer(
     "alert-events",
     bootstrap_servers="localhost:9092",
-    auto_offset_reset="earliest",
+    auto_offset_reset="latest",
     enable_auto_commit=True,
     group_id="alert-worker",
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
@@ -62,7 +62,7 @@ for message in consumer:
             severity=severity,
             alert_type="security",
             description=message_text,
-            created_at=datetime.utcnow()
+            created_at=datetime.now(UTC)
         )
 
         db.add(alert)

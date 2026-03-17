@@ -21,7 +21,7 @@ logger = logging.getLogger("TLSWorker")
 consumer = KafkaConsumer(
     "port-scan-events",
     bootstrap_servers="localhost:9092",
-    auto_offset_reset="earliest",
+    auto_offset_reset="latest",
     group_id="tls-worker",
     enable_auto_commit=True,
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
@@ -116,9 +116,9 @@ for message in consumer:
 
         if existing:
 
-            existing.tls_version = result["tls_version"]
-            existing.cipher_suite = result["cipher_suite"]
-            existing.key_exchange = result["key_exchange"]
+            existing.tls_version = result.get("tls_version")
+            existing.cipher_suite = result.get("cipher_suite")
+            existing.key_exchange = result.get("key_exchange")
             existing.scan_time = datetime.now(UTC)
 
             logger.info(f"TLS updated → {asset}")
@@ -155,7 +155,7 @@ for message in consumer:
     finally:
         db.close()
 
-    # send kafka event for next pipeline
+        # send kafka event for next pipeline
     tls_event = {
         "scan_id": event.get("scan_id"),
         "event_type": "tls_scan_result",
@@ -166,7 +166,8 @@ for message in consumer:
         "certificate_issuer": result.get("certificate_issuer"),
         "certificate_subject": result.get("certificate_subject"),
         "signature_algorithm": result.get("signature_algorithm"),
-        "key_size": result.get("key_size")
+        "key_size": result.get("key_size"),
+        "expiry": result.get("expiry")
     }
 
     producer.send("tls-events", tls_event)

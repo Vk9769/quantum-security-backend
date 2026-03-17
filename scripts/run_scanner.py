@@ -41,7 +41,7 @@ if __name__ == "__main__":
     logger.info("Initializing scan pipeline")
 
     # TEST DOMAIN
-    domains = ["Giftretail.pnbuat.bank.in"]
+    domains = ["digiel.pnbuat.bank.in"]
 
     for domain in domains:
 

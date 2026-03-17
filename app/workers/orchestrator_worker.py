@@ -28,7 +28,7 @@ consumer = KafkaConsumer(
     "alert-events",
     bootstrap_servers="localhost:9092",
     group_id="orchestrator-worker",
-    auto_offset_reset="earliest",
+    auto_offset_reset="latest",
     enable_auto_commit=True,
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )

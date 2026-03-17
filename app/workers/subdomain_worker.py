@@ -16,7 +16,7 @@ logger = logging.getLogger("SubdomainWorker")
 consumer = KafkaConsumer(
     "scan-events",
     bootstrap_servers="localhost:9092",
-    auto_offset_reset="earliest",
+    auto_offset_reset="latest",
     group_id="subdomain-worker",
     enable_auto_commit=True,
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
