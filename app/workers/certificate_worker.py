@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+from datetime import datetime, UTC
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
 
@@ -25,7 +26,7 @@ logger = logging.getLogger("CertificateWorker")
 consumer = KafkaConsumer(
     "tls-events",
     bootstrap_servers="localhost:9092",
-    auto_offset_reset="earliest",
+    auto_offset_reset="latest",
     group_id="certificate-worker",
     enable_auto_commit=True,
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
@@ -79,17 +80,24 @@ for message in consumer:
         # ------------------------------------------------
         # 1️⃣ Try certificate from TLS event
         # ------------------------------------------------
-
         cert = None
 
         if event.get("certificate_subject"):
+
+            expiry = event.get("expiry")
+
+            if isinstance(expiry, str):
+                try:
+                    expiry = datetime.strptime(expiry, "%b %d %H:%M:%S %Y %Z")
+                except:
+                    expiry = None
 
             cert = {
                 "issuer": event.get("certificate_issuer"),
                 "subject": event.get("certificate_subject"),
                 "signature_algorithm": event.get("signature_algorithm"),
                 "key_size": event.get("key_size"),
-                "expiry": None
+                "expiry": expiry
             }
 
             logger.info("Certificate obtained from TLS scan event")

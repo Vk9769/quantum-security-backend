@@ -28,7 +28,7 @@ consumer = KafkaConsumer(
     "certificate-events",
     "tls-events",
     bootstrap_servers="localhost:9092",
-    auto_offset_reset="earliest",
+    auto_offset_reset="latest",
     group_id="cbom-worker",
     enable_auto_commit=True,
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
@@ -99,13 +99,18 @@ for message in consumer:
         ).order_by(Certificate.expiry_date.desc()).first()
 
         cert_data = {
-            "issuer": cert.issuer if cert else None,
-            "subject": cert.subject if cert else None,
-            "signature_algorithm": cert.signature_algorithm if cert else None,
-            "key_size": cert.key_size if cert else None,
-            "expiry": cert.expiry_date.isoformat() if cert and cert.expiry_date else None
-        }
+            "issuer": cert.issuer if cert and cert.issuer else event.get("certificate_issuer"),
+            "subject": cert.subject if cert and cert.subject else event.get("certificate_subject"),
 
+            # IMPORTANT FIX
+            "signature_algorithm": (
+                event.get("signature_algorithm")
+                or (cert.signature_algorithm if cert else None)
+            ),
+
+            "key_size": cert.key_size if cert and cert.key_size else event.get("key_size"),
+            "expiry": cert.expiry_date.isoformat() if cert and cert.expiry_date else event.get("expiry")
+        }
         # --------------------------------
         # Generate CBOM
         # --------------------------------
@@ -140,7 +145,7 @@ for message in consumer:
                 tls_version=cbom_data["tls_version"],
                 cipher_suite=cbom_data["cipher_suite"],
                 key_exchange=cbom_data["key_exchange"],
-                certificate_id=cert.id if cert else None
+                certificate_id = cert.id if cert else None
             )
 
             logger.info(f"CBOM stored → {asset}")

@@ -12,20 +12,17 @@ logger = logging.getLogger("PortScanner")
 # -----------------------------------
 
 def resolve_host(host):
-
     try:
         answers = dns.resolver.resolve(host, "A", lifetime=5)
-        ip = answers[0].to_text()
+        ips = [a.to_text() for a in answers]
 
-        logger.info(f"Resolved {host} → {ip}")
+        logger.info(f"Resolved {host} → {ips}")
 
-        return ip
+        return ips
 
     except Exception as e:
-
         logger.warning(f"DNS resolution failed → {host} | {e}")
-
-        return None
+        return []
 
 
 # -----------------------------------
@@ -121,29 +118,32 @@ def scan_ports(host):
     logger.info(f"Starting enterprise port scan → {host}")
 
     # Resolve domain
-    ip = resolve_host(host)
+    ips = resolve_host(host)
 
-    if not ip:
-
+    if not ips:
         logger.warning(f"Skipping scan (DNS failed) → {host}")
-
         return []
 
-    # Run masscan
-    ports = masscan_scan(ip)
+    all_ports = set()
 
-    if ports:
+    # Scan every IP
+    for ip in ips:
 
-        logger.info(f"Masscan discovered {len(ports)} open ports")
+        # Run masscan
+        ports = masscan_scan(ip)
 
-        return ports
+        if ports:
+            logger.info(f"Masscan discovered {len(ports)} ports on {ip}")
+            all_ports.update(ports)
+            continue
 
-    # Fallback
-    logger.warning("Masscan failed → fallback Python scanner")
+        # Fallback scanner
+        logger.warning(f"Masscan failed → fallback Python scanner ({ip})")
 
-    ports = python_fallback(ip)
+        ports = python_fallback(ip)
 
-    if ports:
-        logger.info(f"Python scanner discovered {len(ports)} open ports")
+        if ports:
+            logger.info(f"Python scanner discovered {len(ports)} ports on {ip}")
+            all_ports.update(ports)
 
-    return ports
+    return sorted(list(all_ports))

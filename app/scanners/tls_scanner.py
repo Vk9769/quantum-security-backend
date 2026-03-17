@@ -42,7 +42,7 @@ def browser_tls_probe(host):
             timeout_seconds=10
         )
 
-        sock = r.connection.sock if hasattr(r.connection, "sock") else None
+        sock = r.raw.connection.sock if hasattr(r.connection, "sock") else None
 
         if not sock:
             return None
@@ -58,7 +58,7 @@ def browser_tls_probe(host):
 
         issuer = cert.issuer.rfc4514_string()
         subject = cert.subject.rfc4514_string()
-        expiry = cert.not_valid_after
+        expiry = cert.not_valid_after_utc
 
         return {
             "tls_version": sock.version(),
@@ -67,7 +67,7 @@ def browser_tls_probe(host):
             "certificate_issuer": issuer,
             "certificate_subject": subject,
             "expiry": expiry.isoformat(),
-            "signature_algorithm": cert.signature_hash_algorithm.name,
+            "signature_algorithm": cert.signature_algorithm_oid._name or cert.signature_hash_algorithm.name,
             "key_size": cert.public_key().key_size
         }
 
@@ -92,15 +92,15 @@ def python_tls_socket(host):
                     cert_bin,
                     default_backend()
                 )
-                expiry = cert.not_valid_after
+                expiry = cert.not_valid_after_utc
                 return {
                     "tls_version": ssock.version(),
                     "cipher_suite": ssock.cipher()[0],
-                    "key_exchange": ssock.cipher()[1],
+                    "key_exchange": None,
                     "certificate_issuer": cert.issuer.rfc4514_string(),
                     "certificate_subject": cert.subject.rfc4514_string(),
                     "expiry": expiry.isoformat(),
-                    "signature_algorithm": cert.signature_hash_algorithm.name,
+                    "signature_algorithm": cert.signature_algorithm_oid._name or cert.signature_hash_algorithm.name,
                     "key_size": cert.public_key().key_size
                 }
 
@@ -257,44 +257,83 @@ def openssl_tls(host):
             "docker",
             "run",
             "--rm",
-            "frapsoft/openssl",
-            "s_client",
-            "-connect",
-            f"{host}:443",
-            "-servername",
-            host
+            "alpine",
+            "sh",
+            "-c",
+            f"apk add --no-cache openssl >/dev/null 2>&1 && openssl s_client -connect {host}:443 -servername {host} -showcerts"
         ]
 
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=15
+            timeout=25
         )
 
-        output = result.stdout + result.stderr
+        output = result.stdout
 
+        issuer = None
+        subject = None
         tls_version = None
         cipher = None
+        key_size = None
+        signature_algorithm = None
+        expiry = None
+        key_exchange = None
 
         for line in output.splitlines():
 
-            if "Protocol  :" in line:
-                tls_version = line.split(":")[1].strip()
+            line = line.strip()
 
-            if "Cipher    :" in line:
-                cipher = line.split(":")[1].strip()
+            if line.startswith("subject="):
+                subject = line.replace("subject=", "").strip()
 
-        if tls_version:
+            elif line.startswith("issuer="):
+                issuer = line.replace("issuer=", "").strip()
 
-            return {
-                "tls_version": tls_version,
-                "cipher_suite": cipher,
-                "key_exchange": None
-            }
+            elif line.startswith("Protocol:"):
+                tls_version = line.split(":",1)[1].strip()
+
+            elif line.startswith("Cipher is"):
+                cipher = line.split("Cipher is")[1].strip()
+
+            elif "PKEY:" in line and "bit" in line:
+                try:
+                    key_size = int(line.split(",")[1].split("(")[0].strip())
+                except:
+                    pass
+
+            elif "sigalg:" in line.lower():
+                try:
+                    signature_algorithm = line.split("sigalg:")[1].strip().split()[0]
+                except:
+                    signature_algorithm = None
+
+            elif "NotAfter:" in line:
+                expiry = line.split("NotAfter:")[1].strip()
+
+            elif "TLS1.3 group" in line or "Negotiated TLS1.3 group" in line:
+                try:
+                    key_exchange = line.split(":")[1].strip()
+                except:
+                    pass
+
+
+        # RETURN OUTSIDE LOOP
+        return {
+            "tls_version": tls_version,
+            "cipher_suite": cipher,
+            "key_exchange": key_exchange,
+            "certificate_subject": subject,
+            "certificate_issuer": issuer,
+            "signature_algorithm": signature_algorithm,
+            "key_size": key_size,
+            "expiry": expiry
+        }
 
     except Exception as e:
-        logger.warning(f"OpenSSL fallback failed → {host} | {e}")
+
+        logger.warning(f"OpenSSL TLS failed → {host} | {e}")
 
     return None
 
@@ -319,34 +358,29 @@ def nmap_tls_scan(host):
     tls_version = None
     cipher = None
     pqc_algorithm = None
+    signature_algorithm = None  
 
     for line in output.splitlines():
 
-        line = line.strip().lstrip("|").strip()
+        line = line.strip()
 
-        if "TLSv1.3" in line:
+        if "TLSv1.3:" in line:
             tls_version = "TLSv1.3"
 
-        elif "TLSv1.2" in line:
-            tls_version = "TLSv1.2"
-            
-        elif "TLSv1.1" in line:
-            tls_version = "TLSv1.1"
-
         if "TLS_" in line:
+            cipher = line.replace("|","").strip().split(" - ")[0]
 
-            cipher = line.split(" - ")[0].strip()
+            if "(" in line:
+                pqc_algorithm = line.split("(")[1].split(")")[0]
 
-            if "(" in cipher and ")" in cipher:
-                pqc_algorithm = cipher.split("(")[1].replace(")", "")
-
-    if not cipher:
-        return None
+        if "Signature Algorithm:" in line:
+            signature_algorithm = line.split("Signature Algorithm:")[1].strip()
 
     return {
         "tls_version": tls_version,
         "cipher_suite": cipher,
-        "key_exchange": pqc_algorithm
+        "key_exchange": pqc_algorithm,
+        "signature_algorithm": signature_algorithm
     }
 
 def shodan_certificate_lookup(host):
@@ -548,7 +582,7 @@ def detect_pqc(cipher):
 
     for algo in pqc_algorithms:
 
-        if algo in cipher.upper():
+        if cipher and algo in cipher.upper():
             return "POST_QUANTUM"
 
     return "CLASSICAL"
@@ -568,12 +602,20 @@ def scan_tls(host):
         logger.info("TLS success via Browser JA3")
         return result
 
+   
     # 2 Python TLS socket
-    result = python_tls_socket(host)
+    socket_result = python_tls_socket(host)
 
-    if result:
+    if socket_result:
         logger.info("TLS success via Python socket")
-        return result
+
+        # Try OpenSSL to extract TLS group (PQC detection)
+        openssl_result = openssl_tls(host)
+
+        if openssl_result:
+            socket_result["key_exchange"] = openssl_result.get("key_exchange")
+
+        return socket_result
 
     # 3 Cloud probe
     cloud = cloud_tls_probe(host)
@@ -596,11 +638,20 @@ def scan_tls(host):
         return result
 
     # 6 Nmap SSL enumeration
+  
     tls = nmap_tls_scan(host)
 
     if tls:
 
-        pqc_status = detect_pqc(tls["cipher_suite"])
+        cert = openssl_tls(host)
+
+        for k, v in cert.items():
+            if v and not tls.get(k):
+                tls[k] = v
+
+        pqc_status = detect_pqc(
+            tls.get("key_exchange") or tls.get("cipher_suite")
+        )
 
         tls["quantum_security"] = pqc_status
 

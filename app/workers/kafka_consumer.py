@@ -21,7 +21,7 @@ consumer = KafkaConsumer(
     "port-scan-events",
     "drift-alerts",
     bootstrap_servers="localhost:9092",
-    auto_offset_reset="earliest",
+    auto_offset_reset="latest",
     enable_auto_commit=True,
     group_id="kafka-consumer",
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))

@@ -12,7 +12,11 @@ PQC_ALGORITHMS = [
     "KYBER",
     "FRODOKEM",
     "BIKE",
-    "NTRU"
+    "NTRU",
+    "MLKEM768",
+    "KYBER768",
+    "X25519MLKEM",
+    "X25519KYBER"
 ]
 
 # ---------------------------------------
@@ -24,7 +28,10 @@ SHOR_BREAKABLE = [
     "ECDSA",
     "ECDH",
     "ECDHE",
-    "DSA"
+    "DSA",
+    "SHA256WITHRSA",
+    "SHA384WITHRSA",
+    "SHA512WITHRSA"
 ]
 
 
@@ -63,6 +70,11 @@ def contains_classical(text: str):
 def analyze_quantum_risk(cbom):
 
     signature_algorithm = (cbom.get("signature_algorithm") or "").upper()
+
+    # normalize common names
+    if "SHA256" in signature_algorithm and "RSA" not in signature_algorithm:
+        signature_algorithm = "SHA256WITHRSA"
+        
     cipher = (cbom.get("cipher_suite") or "").upper()
     key_exchange = (cbom.get("key_exchange") or "").upper()
     tls_version = (cbom.get("tls_version") or "").upper()
@@ -105,6 +117,10 @@ def analyze_quantum_risk(cbom):
         logger.info("Hybrid Post-Quantum TLS detected")
 
         return "HYBRID_POST_QUANTUM"
+    
+    # Detect hybrid PQC TLS groups
+    if "MLKEM" in key_exchange and "X25519" in key_exchange:
+        return "HYBRID_POST_QUANTUM"
 
     # -----------------------------------
     # 4️⃣ FULL PQC
@@ -120,17 +136,17 @@ def analyze_quantum_risk(cbom):
     # 5️⃣ CLASSICAL CRYPTO (Broken by Shor)
     # -----------------------------------
 
-    if classical_detected:
+    if classical_detected or "RSA" in signature_algorithm:
 
-        if "RSA" in signature_algorithm and key_size:
+       if "RSA" in signature_algorithm or "RSA" in cipher:
 
-            if key_size < 2048:
+            if key_size and key_size < 2048:
                 return "CRITICAL"
 
-            if key_size < 3072:
+            if key_size and key_size < 3072:
                 return "NOT_QUANTUM_SAFE"
 
-        return "NOT_QUANTUM_SAFE"
+            return "NOT_QUANTUM_SAFE"
 
     # -----------------------------------
     # 6️⃣ UNKNOWN CASE
