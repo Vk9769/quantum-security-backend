@@ -160,3 +160,109 @@ class GraphService:
                 score=score,
                 quantum_risk=quantum_risk
             )
+            
+    def get_topology(self):
+
+        query = """
+        MATCH (d:Domain)-[:OWNS]->(a:Asset)
+        OPTIONAL MATCH (a)-[:HAS_PORT]->(p:Port)
+        OPTIONAL MATCH (a)-[:HAS_TLS]->(t:TLS)
+        OPTIONAL MATCH (a)-[:HAS_CERTIFICATE]->(c:Certificate)
+        OPTIONAL MATCH (a)-[:HAS_CBOM]->(cb:CBOM)
+
+        RETURN d,a,p,t,c,cb
+        LIMIT 1000
+        """
+
+        nodes = {}
+        links = []
+
+        with self.driver.session() as session:
+            result = session.run(query)
+
+            for record in result:
+
+                d = record["d"]
+                a = record["a"]
+                p = record["p"]
+                t = record["t"]
+                c = record["c"]
+                cb = record["cb"]
+
+                # DOMAIN
+                if d:
+                    nodes[d.id] = {
+                        "id": str(d.id),
+                        "label": d["name"],
+                        "type": "domain"
+                    }
+
+                # ASSET
+                if a:
+                    nodes[a.id] = {
+                        "id": str(a.id),
+                        "label": a["name"],
+                        "type": "subdomain"
+                    }
+
+                    links.append({
+                        "from": str(d.id),
+                        "to": str(a.id)
+                    })
+
+                # PORT
+                if p:
+                    nodes[p.id] = {
+                        "id": str(p.id),
+                        "label": str(p["number"]),
+                        "type": "ip"
+                    }
+
+                    links.append({
+                        "from": str(a.id),
+                        "to": str(p.id)
+                    })
+
+                # TLS
+                if t:
+                    nodes[t.id] = {
+                        "id": str(t.id),
+                        "label": t.get("version","TLS"),
+                        "type": "cert"
+                    }
+
+                    links.append({
+                        "from": str(a.id),
+                        "to": str(t.id)
+                    })
+
+                # CERTIFICATE
+                if c:
+                    nodes[c.id] = {
+                        "id": str(c.id),
+                        "label": c.get("issuer","cert"),
+                        "type": "cert"
+                    }
+
+                    links.append({
+                        "from": str(a.id),
+                        "to": str(c.id)
+                    })
+
+                # CBOM
+                if cb:
+                    nodes[cb.id] = {
+                        "id": str(cb.id),
+                        "label": cb.get("algorithm","unknown"),
+                        "type": "cert"
+                    }
+
+                    links.append({
+                        "from": str(a.id),
+                        "to": str(cb.id)
+                    })
+
+        return {
+            "nodes": list(nodes.values()),
+            "links": links
+        }
