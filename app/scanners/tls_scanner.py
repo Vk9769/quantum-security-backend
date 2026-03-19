@@ -303,9 +303,12 @@ def openssl_tls(host):
                 except:
                     pass
 
-            elif "sigalg:" in line.lower():
+            elif "sigalg:" in line.lower() or "Peer signature type" in line:
                 try:
-                    signature_algorithm = line.split("sigalg:")[1].strip().split()[0]
+                    if "sigalg:" in line.lower():
+                        signature_algorithm = line.split("sigalg:")[1].strip().split()[0]
+                    elif "Peer signature type:" in line:
+                        signature_algorithm = line.split(":")[1].strip()
                 except:
                     signature_algorithm = None
 
