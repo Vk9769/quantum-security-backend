@@ -8,6 +8,8 @@ from app.db.postgres import SessionLocal
 from app.models.scan_jobs import ScanJob
 from app.models.scan_events import ScanEvent
 from app.models.event_stream import EventStream
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s - %(message)s",
@@ -16,6 +18,17 @@ logging.basicConfig(
 logging.getLogger("kafka").setLevel(logging.WARNING)
 logger = logging.getLogger("OrchestratorWorker")
 
+from app.utils.log_streamer import setup_logger
+setup_logger()
+
+from app.workers.kafka_producer import send_event
+
+def send_log(message: str, scan_id: str = None):
+    send_event("scan-logs", {
+        "type": "log",
+        "message": message,
+        "scan_id": scan_id
+    })
 
 consumer = KafkaConsumer(
     "scan-events",
@@ -87,26 +100,6 @@ def store_scan_event(db: Session, scan_id, event_type: str, payload: dict):
     db.commit()
 
 
-def create_scan_job(db: Session, domain, scan_id):
-
-    job = ScanJob(
-        id=scan_id,
-        organization_id="10024715-cd08-49a4-b316-4f394c14d267",
-        scan_type="external_attack_surface",
-        trigger="manual",
-        status="running",
-        started_at=datetime.now(UTC)
-    )
-
-    db.add(job)
-    db.commit()
-
-    logger.info(f"Scan job created → {scan_id}")
-    logger.info(f"Scan job created → {job.id}")
-
-    return job.id
-
-
 def finish_scan_job(db: Session, scan_id):
 
     job = db.query(ScanJob).filter(
@@ -149,7 +142,7 @@ for message in consumer:
             domain = event["domain"]
             scan_id = event["scan_id"]
 
-            create_scan_job(db, domain, scan_id)
+            # ✅ DO NOT CREATE AGAIN (already created in API)
 
             store_scan_event(
                 db,
@@ -159,6 +152,7 @@ for message in consumer:
             )
 
             logger.info(f"Scan started → {domain}")
+            send_log(f"🚀 Scan started → {domain}", scan_id)
 
         # ------------------------------------
         # Asset Discovered
@@ -177,6 +171,7 @@ for message in consumer:
             )
 
             logger.info(f"Asset discovered → {event['asset']}")
+            send_log(f"🌐 Asset discovered → {event['asset']}", scan_id)
 
         # ------------------------------------
         # Port Scan
@@ -198,6 +193,7 @@ for message in consumer:
             logger.info(
                 f"Port discovered → {event['asset']}:{event['port']}"
             )
+            send_log(f"🔓 Port open → {event['asset']}:{event['port']}", scan_id)
 
         # ------------------------------------
         # TLS Scan
@@ -219,6 +215,7 @@ for message in consumer:
             logger.info(
                 f"TLS scan → {event['asset']} {event['tls_version']}"
             )
+            send_log(f"🔐 TLS detected → {event['asset']} {event['tls_version']}", scan_id)
 
         # ------------------------------------
         # Certificate
@@ -240,6 +237,7 @@ for message in consumer:
             logger.info(
                 f"Certificate → {event['asset']}"
             )
+            send_log(f"📜 Certificate discovered → {event['asset']}", scan_id)
 
         # ------------------------------------
         # CBOM Generated
@@ -261,6 +259,7 @@ for message in consumer:
             logger.info(
                 f"CBOM generated → {event['asset']}"
             )
+            send_log(f"📦 CBOM generated → {event['asset']}", scan_id)
 
         # ------------------------------------
         # Risk Analysis
@@ -283,6 +282,7 @@ for message in consumer:
             logger.info(
                 f"Vulnerability → {event['asset']} {event['cve']}"
             )
+            send_log(f"⚠ Vulnerability → {event['asset']} {event['cve']}", scan_id)
 
         # ------------------------------------
         # Alerts
@@ -304,15 +304,13 @@ for message in consumer:
             logger.info(
                 f"Alert → {event['asset']} {event['severity']}"
             )
+            send_log(f"🚨 Alert → {event['asset']} {event['severity']}", scan_id)
 
-        # ------------------------------------
-        # Scan Finished Condition
-        # ------------------------------------
-
-        if event_type == "cbom_generated":
-            
-            # Example simple completion rule
+            # ✅ FINAL COMPLETION (CORRECT PLACE)
             finish_scan_job(db, scan_id)
+
+            logger.info(f"✅ Scan completed → {scan_id}")
+            send_log("✅ Scan completed", scan_id)
 
     except Exception as e:
 

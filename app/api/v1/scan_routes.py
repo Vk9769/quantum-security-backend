@@ -1,13 +1,19 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from datetime import datetime
+import asyncio
+
+from app.db.postgres import SessionLocal
+from app.models.asset_registry import AssetRegistry
+from app.models.scan_jobs import ScanJob
 from app.workers.kafka_producer import send_event
+from app.utils.websocket_manager import manager
 
 router = APIRouter()
 
 
 # ============================================
-# Request Model (for Swagger + validation)
+# REQUEST MODEL
 # ============================================
 
 class ScanRequest(BaseModel):
@@ -18,40 +24,141 @@ class ScanRequest(BaseModel):
 # START SECURITY SCAN
 # ============================================
 
-@router.post("/scan/start")
+@router.post("/start")
 def start_scan(payload: ScanRequest):
 
-    domain = payload.domain.strip()
+    domain = payload.domain.strip().lower()
 
     if not domain:
         raise HTTPException(status_code=400, detail="Domain is required")
 
-    event = {
-        "domain": domain,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    db = SessionLocal()
 
-    # Send event to Kafka so workers start scanning
-    send_event("scan_start", event)
+    try:
 
-    return {
-        "status": "started",
-        "domain": domain,
-        "message": "Scan initiated successfully"
-    }
+        # ============================================
+        # 1. CREATE SCAN JOB
+        # ============================================
+
+        scan_job = ScanJob(
+            organization_id="10024715-cd08-49a4-b316-4f394c14d267",  # TODO: dynamic later
+            scan_type="full",
+            trigger="manual",
+            status="running",
+            started_at=datetime.utcnow()
+        )
+
+        db.add(scan_job)
+        db.commit()
+        db.refresh(scan_job)
+
+        scan_id = str(scan_job.id)
+
+        # ============================================
+        # 2. CHECK IF DOMAIN ALREADY EXISTS
+        # ============================================
+
+        existing = db.query(AssetRegistry).filter(
+            AssetRegistry.asset_identifier == domain
+        ).first()
+
+        if not existing:
+            asset = AssetRegistry(
+                organization_id="10024715-cd08-49a4-b316-4f394c14d267",
+                asset_identifier=domain,
+                asset_type="domain",
+                first_seen=datetime.utcnow(),
+                last_seen=datetime.utcnow(),
+                status="discovered",
+                criticality="medium"
+            )
+
+            db.add(asset)
+            db.commit()
+
+        # ============================================
+        # 3. SEND EVENT TO KAFKA
+        # ============================================
+
+        event = {
+            "event_type": "scan_started",
+            "domain": domain,
+            "scan_id": scan_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        send_event("scan-events", event)
+
+        # ============================================
+        # 4. SEND REAL-TIME WS LOG
+        # ============================================
+        
+        import logging
+
+        logger = logging.getLogger("ScanRoute")
+
+        logger.info(f"🔍 Scan started for {domain}")
+
+        return {
+            "status": "started",
+            "domain": domain,
+            "scan_id": scan_id,
+            "message": "Scan initiated successfully"
+        }
+
+    except Exception as e:
+        db.rollback()
+        print("SCAN ERROR:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        db.close()
 
 
 # ============================================
-# SCAN STATUS (for loader / progress UI)
+# SCAN STATUS
 # ============================================
 
-@router.get("/scan/status/{domain}")
+@router.get("/status/{domain}")
 def scan_status(domain: str):
 
-    # Placeholder for now
-    # Later this will check DB or Redis
+    db = SessionLocal()
 
-    return {
-        "domain": domain,
-        "status": "running"
-    }
+    try:
+
+        scan = db.query(ScanJob)\
+            .order_by(ScanJob.started_at.desc())\
+            .first()
+
+        if not scan:
+            return {
+                "domain": domain,
+                "status": "not_found"
+            }
+
+        return {
+            "domain": domain,
+            "status": scan.status,
+            "scan_id": str(scan.id),
+            "started_at": scan.started_at
+        }
+
+    finally:
+        db.close()
+
+
+# ============================================
+# WEBSOCKET FOR REAL-TIME LOGS
+# ============================================
+
+@router.websocket("/ws")
+async def scan_websocket(websocket: WebSocket):
+
+    await manager.connect(websocket)
+
+    try:
+        while True:
+            await asyncio.sleep(1)  # keep alive
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)

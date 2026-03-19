@@ -1,20 +1,24 @@
 import json
 import os
 import logging
-from kafka import KafkaProducer
-from dotenv import load_dotenv
 import uuid
 
+from kafka import KafkaProducer
+from dotenv import load_dotenv
+
+
+
 # ---------------------------------------------------
-# Load environment variables
+# LOAD ENV
 # ---------------------------------------------------
 
 load_dotenv()
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092")
 
+
 # ---------------------------------------------------
-# Logging
+# LOGGING
 # ---------------------------------------------------
 
 logging.basicConfig(
@@ -24,8 +28,9 @@ logging.basicConfig(
 
 logger = logging.getLogger("KafkaProducer")
 
+
 # ---------------------------------------------------
-# JSON Serializer
+# JSON SERIALIZER
 # ---------------------------------------------------
 
 def json_serializer(value):
@@ -35,46 +40,65 @@ def json_serializer(value):
         logger.error("JSON serialization failed")
         logger.error(e)
         return None
-
-
+    
 # ---------------------------------------------------
-# Kafka Producer
+# KAFKA PRODUCER INIT (RETRY SAFE)
 # ---------------------------------------------------
 
 producer = None
 
-try:
+def init_producer():
 
-    producer = KafkaProducer(
-        bootstrap_servers="localhost:9092",
-        api_version=(2, 6),
-        value_serializer=json_serializer,
-        key_serializer=lambda k: k.encode("utf-8") if k else None,
-        retries=5,
-        linger_ms=10,
-        acks="all",
-        request_timeout_ms=30000
-    )
+    global producer
 
-    logger.info(f"Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+    if producer:
+        return producer
 
-except Exception as e:
+    try:
+        producer = KafkaProducer(
+            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+            api_version=(2, 6),
+            value_serializer=json_serializer,
+            key_serializer=lambda k: k.encode("utf-8") if k else None,
+            retries=5,
+            linger_ms=10,
+            acks="all",
+            request_timeout_ms=30000
+        )
 
-    logger.error("Kafka connection failed")
-    logger.error(e)
+        logger.info(f"Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+
+    except Exception as e:
+        logger.error("Kafka connection failed")
+        logger.error(e)
+
+    return producer
+
+
+# initialize on import
+init_producer()
 
 
 # ---------------------------------------------------
-# Generic Event Sender
+# GENERIC EVENT SENDER
 # ---------------------------------------------------
 
 def send_event(topic: str, data: dict, key: str = None):
 
+    global producer
+
     if producer is None:
-        logger.error("Kafka producer not initialized")
-        return
+        logger.warning("Producer not initialized, retrying...")
+        producer = init_producer()
+
+        if producer is None:
+            logger.error("Kafka producer unavailable")
+            return
 
     try:
+        
+        if "scan_id" not in data or data.get("scan_id") is None:
+            data["scan_id"] = "unknown"  # fallback (prevents None)
 
         future = producer.send(
             topic,
@@ -83,13 +107,14 @@ def send_event(topic: str, data: dict, key: str = None):
         )
 
         metadata = future.get(timeout=10)
-        producer.flush()
+
         logger.info(
             f"Event sent → topic={metadata.topic} "
             f"partition={metadata.partition} "
             f"offset={metadata.offset}"
         )
-
+        
+        
     except Exception as e:
 
         logger.error("Kafka event send failed")
@@ -97,12 +122,10 @@ def send_event(topic: str, data: dict, key: str = None):
 
 
 # ---------------------------------------------------
-# Pipeline Event Helpers
+# PIPELINE EVENTS
 # ---------------------------------------------------
 
-def send_scan_started(domain: str):
-
-    scan_id = str(uuid.uuid4())
+def send_scan_started(domain: str, scan_id: str):
 
     event = {
         "scan_id": scan_id,
@@ -111,8 +134,6 @@ def send_scan_started(domain: str):
     }
 
     send_event("scan-events", event, key=domain)
-
-    return scan_id
 
 
 def send_asset_discovered(asset: str, domain: str, scan_id: str):
@@ -154,18 +175,23 @@ def send_tls_scan_result(asset: str, tls_version: str, cipher: str, scan_id: str
 
 def send_certificate_discovered(cert_data: dict, scan_id: str):
 
-    cert_data["scan_id"] = scan_id
-    cert_data["event_type"] = "certificate_discovered"
+    cert_data.update({
+        "scan_id": scan_id,
+        "event_type": "certificate_discovered"
+    })
 
-    send_event("certificate-events", cert_data, key=cert_data["asset"])
+    send_event("certificate-events", cert_data, key=cert_data.get("asset"))
 
 
 def send_cbom_generated(cbom_data: dict, scan_id: str):
 
-    cbom_data["scan_id"] = scan_id
-    cbom_data["event_type"] = "cbom_generated"
+    cbom_data.update({
+        "scan_id": scan_id,
+        "event_type": "cbom_generated"
+    })
 
-    send_event("cbom-events", cbom_data, key=cbom_data["asset"])
+    send_event("cbom-events", cbom_data, key=cbom_data.get("asset"))
+
 
 def send_vulnerability_detected(asset: str, cve: str, scan_id: str):
 
@@ -193,7 +219,7 @@ def send_alert(asset: str, severity: str, message: str, scan_id: str):
 
 
 # ---------------------------------------------------
-# Shutdown Producer
+# SHUTDOWN
 # ---------------------------------------------------
 
 def close_producer():
@@ -202,27 +228,29 @@ def close_producer():
 
     if producer:
 
-        producer.flush()
-        producer.close()
+        try:
+            producer.flush()
+            producer.close()
+            logger.info("Kafka producer closed")
 
-        logger.info("Kafka producer closed")
+        except Exception as e:
+            logger.error("Error closing producer")
+            logger.error(e)
 
 
 # ---------------------------------------------------
-# Test Runner
+# TEST RUNNER
 # ---------------------------------------------------
 
 if __name__ == "__main__":
 
     logger.info("Testing Kafka Producer")
 
-    scan_id = send_scan_started("bank.in")
+    scan_id = str(uuid.uuid4())
 
-    send_asset_discovered(
-        "api.bank.in",
-        "bank.in",
-        scan_id
-    )
+    send_scan_started("bank.in", scan_id)
+
+    send_asset_discovered("api.bank.in", "bank.in", scan_id)
 
     send_tls_scan_result(
         "api.bank.in",

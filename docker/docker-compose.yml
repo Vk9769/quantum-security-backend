@@ -46,13 +46,11 @@ services:
 
 
   quantum_kafka:
-
     image: apache/kafka:3.7.0
     container_name: quantum_kafka
     ports:
       - "9092:9092"
     environment:
-
       CLUSTER_ID: 9riA7JQ7T2O2CfJPV4tvug
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -69,10 +67,10 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
 
-  masscan:
-    image: quantum_masscan
-    container_name: quantum_masscan
-    network_mode: host
+  # masscan:
+  #  image: quantum_masscan
+  #  container_name: quantum_masscan
+  #  network_mode: host
 
   zgrab:
     image: ghcr.io/zmap/zgrab2

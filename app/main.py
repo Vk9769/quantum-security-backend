@@ -2,6 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import logging
+from app.utils.log_streamer import setup_logger, set_main_loop
+
+import threading
+from app.workers.log_consumer import start_log_consumer
+
 
 # Load environment variables
 load_dotenv()
@@ -16,7 +21,7 @@ from app.api.v1.router import router
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s [%(name)s] %(levelname)s - %(message)s"
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +39,14 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# 🔥 ADD THESE 3 LINES (IMPORTANT)
+logging.getLogger("uvicorn.access").disabled = True
+logging.getLogger("uvicorn.error").disabled = True
+logging.getLogger("uvicorn").disabled = True
+
+# 🔥 KEEP THIS
+setup_logger()
+
 
 # -----------------------------------------------------
 # CORS Configuration
@@ -42,8 +55,17 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # allow all origins during development
-    allow_credentials=False,
+    allow_origins=[
+        "http://localhost:8080",
+        "http://localhost:8000",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:8000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000"
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -55,14 +77,34 @@ app.add_middleware(
 
 from app.db.postgres import Base, engine
 from app.models import user, organization
+from app.services.graph_service import GraphService
 
 @app.on_event("startup")
 async def startup_event():
+
+    import asyncio
+
+    # 🔥 FIX 1: store main loop (for log_streamer)
+    set_main_loop(asyncio.get_running_loop())
+
+    # 🔥 FIX 2: start Kafka log consumer (VERY IMPORTANT)
+    threading.Thread(
+        target=start_log_consumer,
+        daemon=True
+    ).start()
+
     logger.info("Quantum Security Scanner API starting...")
 
     # Create tables automatically
     Base.metadata.create_all(bind=engine)
 
+    # Test Neo4j connection
+    try:
+        graph = GraphService()
+        logger.info("Neo4j connection initialized")
+        graph.close()
+    except Exception as e:
+        logger.error(f"Neo4j connection failed: {e}")
 
 # -----------------------------------------------------
 # Shutdown Event

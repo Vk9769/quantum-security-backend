@@ -1,7 +1,8 @@
 import json
 import logging
 import time
-from datetime import datetime, UTC
+import asyncio
+from datetime import datetime
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
 
@@ -12,6 +13,22 @@ from app.models.asset_registry import AssetRegistry
 from app.models.certificate import Certificate
 from app.workers.kafka_producer import send_event
 
+# 🔥 ADD THIS (LOG TO KAFKA)
+def send_log(message: str, scan_id: str = None):
+    send_event("scan-logs", {
+        "type": "log",
+        "message": message,
+        "scan_id": scan_id
+    })
+    
+from app.utils.log_streamer import setup_logger
+
+
+# -------------------- ENABLE GLOBAL LOG STREAM --------------------
+setup_logger()
+
+
+# -------------------- LOGGING --------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s - %(message)s",
@@ -19,10 +36,10 @@ logging.basicConfig(
 )
 
 logging.getLogger("kafka").setLevel(logging.WARNING)
-
 logger = logging.getLogger("CertificateWorker")
 
 
+# -------------------- KAFKA --------------------
 consumer = KafkaConsumer(
     "tls-events",
     bootstrap_servers="localhost:9092",
@@ -32,21 +49,29 @@ consumer = KafkaConsumer(
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )
 
-logger.info("Certificate Worker Started")
+logger.info("🚀 Certificate Worker Started")
 print("Waiting for Kafka messages...")
 
+
+# -------------------- MAIN LOOP --------------------
 
 for message in consumer:
 
     print("KAFKA MESSAGE RECEIVED:", message.value)
 
     event = message.value
+    
+    scan_id = event.get("scan_id")
+    
+    if not scan_id:
+        logger.warning(f"No scan_id for certificate → {host}")
 
     if event.get("event_type") != "tls_scan_result":
         continue
 
-    host = event["asset"].lower().strip()
+    host = event.get("asset", "").lower().strip()
 
+    # clean URL
     host = (
         host.replace("https://", "")
             .replace("http://", "")
@@ -54,9 +79,19 @@ for message in consumer:
             .strip("/")
     )
 
+    if not host:
+        continue
+
     db: Session = SessionLocal()
 
     try:
+
+        logger.info(f"🔐 Processing certificate → {host}")
+        send_log(f"🔐 Processing certificate → {host}", scan_id)
+
+        # ------------------------------------------------
+        # 1️⃣ GET ASSET
+        # ------------------------------------------------
 
         asset = db.query(AssetRegistry).filter(
             AssetRegistry.asset_identifier == host
@@ -65,6 +100,8 @@ for message in consumer:
         if not asset:
 
             logger.warning(f"Asset not found → {host}, retrying...")
+            send_log(f"Retrying asset lookup: {host}", scan_id)
+
             time.sleep(2)
 
             asset = db.query(AssetRegistry).filter(
@@ -73,13 +110,13 @@ for message in consumer:
 
             if not asset:
                 logger.warning(f"Asset still missing → {host}")
+                send_log(f"Asset not found: {host}", scan_id)
                 continue
 
-        logger.info(f"Processing certificate → {host}")
+        # ------------------------------------------------
+        # 2️⃣ GET CERTIFICATE
+        # ------------------------------------------------
 
-        # ------------------------------------------------
-        # 1️⃣ Try certificate from TLS event
-        # ------------------------------------------------
         cert = None
 
         if event.get("certificate_subject"):
@@ -100,29 +137,25 @@ for message in consumer:
                 "expiry": expiry
             }
 
-            logger.info("Certificate obtained from TLS scan event")
-
-        # ------------------------------------------------
-        # 2️⃣ Fallback to direct certificate scan
-        # ------------------------------------------------
-
+            logger.info("Certificate obtained from TLS event")
+            send_log(f"🔐 TLS certificate found → {host}", scan_id)
         else:
 
-            logger.info("TLS event had no certificate → trying direct scan")
+            logger.info("TLS event had no certificate → fallback scan")
+            send_log(f"🔍 Fallback certificate scan → {host}", scan_id)
 
             try:
-
                 cert = get_certificate_info(host)
-
             except Exception:
                 cert = None
 
             if not cert:
                 logger.warning(f"No certificate available → {host}")
+                send_log(f"❌ No certificate found → {host}", scan_id)
                 continue
 
         # ------------------------------------------------
-        # Check if certificate already exists
+        # 3️⃣ CHECK DUPLICATE
         # ------------------------------------------------
 
         cert_exists = db.query(Certificate).filter(
@@ -131,12 +164,12 @@ for message in consumer:
         ).first()
 
         if cert_exists:
-
             logger.info(f"Certificate already exists → {host}")
+            send_log(f"⚠ Certificate already exists → {host}", scan_id)
             continue
 
         # ------------------------------------------------
-        # Store certificate
+        # 4️⃣ STORE CERTIFICATE
         # ------------------------------------------------
 
         store_certificate_result(
@@ -148,6 +181,10 @@ for message in consumer:
             signature_algorithm=cert.get("signature_algorithm"),
             key_size=cert.get("key_size")
         )
+
+        # ------------------------------------------------
+        # 5️⃣ SEND EVENT
+        # ------------------------------------------------
 
         cert_event = {
             "scan_id": event.get("scan_id"),
@@ -162,12 +199,17 @@ for message in consumer:
 
         send_event("certificate-events", cert_event)
 
-        logger.info(f"Certificate stored → {host}")
+        logger.info(f"✅ Certificate stored → {host}")
+        send_log(f"📜 Certificate stored → {host}", scan_id)
 
     except Exception as e:
 
-        logger.error(f"Certificate worker failed → {host}")
+        db.rollback()
+
+        logger.error(f"❌ Certificate worker failed → {host}")
         logger.error(e)
+
+        send_log(f"❌ Certificate scan failed → {host}", scan_id)
 
     finally:
 

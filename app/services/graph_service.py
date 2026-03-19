@@ -161,24 +161,41 @@ class GraphService:
                 quantum_risk=quantum_risk
             )
             
-    def get_topology(self):
+    def get_topology(self, domain=None):
 
-        query = """
-        MATCH (d:Domain)-[:OWNS]->(a:Asset)
-        OPTIONAL MATCH (a)-[:HAS_PORT]->(p:Port)
-        OPTIONAL MATCH (a)-[:HAS_TLS]->(t:TLS)
-        OPTIONAL MATCH (a)-[:HAS_CERTIFICATE]->(c:Certificate)
-        OPTIONAL MATCH (a)-[:HAS_CBOM]->(cb:CBOM)
+        if domain:
+            query = """
+            MATCH (d:Domain {name:$domain})
+            OPTIONAL MATCH (d)-[:OWNS]->(a:Asset)
+            OPTIONAL MATCH (a)-[:HAS_PORT]->(p:Port)
+            OPTIONAL MATCH (a)-[:HAS_TLS]->(t:TLS)
+            OPTIONAL MATCH (a)-[:HAS_CERTIFICATE]->(c:Certificate)
+            OPTIONAL MATCH (a)-[:HAS_CBOM]->(cb:CBOM)
 
-        RETURN d,a,p,t,c,cb
-        LIMIT 1000
-        """
+            RETURN d,a,p,t,c,cb
+            LIMIT 2000
+            """
+            params = {"domain": domain}
+        else:
+            query = """
+            MATCH (d:Domain)
+            OPTIONAL MATCH (d)-[:OWNS]->(a:Asset)
+            OPTIONAL MATCH (a)-[:HAS_PORT]->(p:Port)
+            OPTIONAL MATCH (a)-[:HAS_TLS]->(t:TLS)
+            OPTIONAL MATCH (a)-[:HAS_CERTIFICATE]->(c:Certificate)
+            OPTIONAL MATCH (a)-[:HAS_CBOM]->(cb:CBOM)
+
+            RETURN d,a,p,t,c,cb
+            LIMIT 2000
+            """
+            params = {}
 
         nodes = {}
-        links = []
+        edges = set()
 
         with self.driver.session() as session:
-            result = session.run(query)
+
+            result = session.run(query, params)
 
             for record in result:
 
@@ -189,80 +206,102 @@ class GraphService:
                 c = record["c"]
                 cb = record["cb"]
 
-                # DOMAIN
+                # -------------------------
+                # DOMAIN NODE
+                # -------------------------
+
                 if d:
-                    nodes[d.id] = {
-                        "id": str(d.id),
+
+                    domain_id = f"domain:{d['name']}"
+
+                    nodes[domain_id] = {
+                        "id": domain_id,
                         "label": d["name"],
                         "type": "domain"
                     }
 
-                # ASSET
+                # -------------------------
+                # ASSET / SUBDOMAIN
+                # -------------------------
+
                 if a:
-                    nodes[a.id] = {
-                        "id": str(a.id),
+
+                    asset_id = f"asset:{a['name']}"
+
+                    nodes[asset_id] = {
+                        "id": asset_id,
                         "label": a["name"],
                         "type": "subdomain"
                     }
 
-                    links.append({
-                        "from": str(d.id),
-                        "to": str(a.id)
-                    })
+                    if d:
+                        edges.add((domain_id, asset_id))
 
+                # -------------------------
                 # PORT
-                if p:
-                    nodes[p.id] = {
-                        "id": str(p.id),
+                # -------------------------
+
+                if p and a:
+
+                    port_id = f"port:{p['number']}:{a['name']}"
+
+                    nodes[port_id] = {
+                        "id": port_id,
                         "label": str(p["number"]),
-                        "type": "ip"
+                        "type": "port"
                     }
 
-                    links.append({
-                        "from": str(a.id),
-                        "to": str(p.id)
-                    })
+                    edges.add((asset_id, port_id))
 
+                # -------------------------
                 # TLS
-                if t:
-                    nodes[t.id] = {
-                        "id": str(t.id),
-                        "label": t.get("version","TLS"),
-                        "type": "cert"
+                # -------------------------
+
+                if t and a:
+
+                    tls_id = f"tls:{t.get('version','TLS')}:{a['name']}"
+
+                    nodes[tls_id] = {
+                        "id": tls_id,
+                        "label": t.get("version", "TLS"),
+                        "type": "tls"
                     }
 
-                    links.append({
-                        "from": str(a.id),
-                        "to": str(t.id)
-                    })
+                    edges.add((asset_id, tls_id))
 
+                # -------------------------
                 # CERTIFICATE
-                if c:
-                    nodes[c.id] = {
-                        "id": str(c.id),
-                        "label": c.get("issuer","cert"),
+                # -------------------------
+
+                if c and a:
+
+                    cert_id = f"cert:{c.get('issuer','cert')}:{a['name']}"
+
+                    nodes[cert_id] = {
+                        "id": cert_id,
+                        "label": c.get("issuer", "Certificate"),
                         "type": "cert"
                     }
 
-                    links.append({
-                        "from": str(a.id),
-                        "to": str(c.id)
-                    })
+                    edges.add((asset_id, cert_id))
 
+                # -------------------------
                 # CBOM
-                if cb:
-                    nodes[cb.id] = {
-                        "id": str(cb.id),
-                        "label": cb.get("algorithm","unknown"),
-                        "type": "cert"
+                # -------------------------
+
+                if cb and a:
+
+                    cbom_id = f"cbom:{cb.get('algorithm','cbom')}:{a['name']}"
+
+                    nodes[cbom_id] = {
+                        "id": cbom_id,
+                        "label": cb.get("algorithm", "CBOM"),
+                        "type": "cbom"
                     }
 
-                    links.append({
-                        "from": str(a.id),
-                        "to": str(cb.id)
-                    })
+                    edges.add((asset_id, cbom_id))
 
         return {
             "nodes": list(nodes.values()),
-            "links": links
+            "edges": [{"from": f, "to": t} for f, t in edges]
         }

@@ -1,13 +1,18 @@
 import json
 import logging
 import time
+import asyncio
 
 from kafka import KafkaConsumer, KafkaProducer
 
 from app.scanners.port_scanner import scan_ports
 from app.db.postgres import SessionLocal
 from app.services.scan_service import store_port_scan_result
+from app.services.graph_service import GraphService
+from app.workers.kafka_producer import send_event
 
+
+# -------------------- LOGGING --------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s - %(message)s",
@@ -17,6 +22,16 @@ logging.basicConfig(
 logging.getLogger("kafka").setLevel(logging.WARNING)
 logger = logging.getLogger("PortScanWorker")
 
+
+def send_log(message: str, scan_id: str = None):
+    send_event("scan-logs", {
+        "type": "log",
+        "message": message,
+        "scan_id": scan_id
+    })
+
+# -------------------- INIT --------------------
+graph = GraphService()
 scanned_assets = set()
 
 consumer = KafkaConsumer(
@@ -33,9 +48,10 @@ producer = KafkaProducer(
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
 )
 
-logger.info("Port Scan Worker Started")
-
+logger.info("🚀 Port Scan Worker Started")
 print("Waiting for Kafka messages...")
+
+# -------------------- MAIN LOOP --------------------
 
 for message in consumer:
 
@@ -46,8 +62,11 @@ for message in consumer:
     if event.get("event_type") != "asset_discovered":
         continue
 
-    asset = event["asset"]
+    asset = event.get("asset")
     scan_id = event.get("scan_id")
+
+    if not asset:
+        continue
 
     # prevent duplicate scanning
     if asset in scanned_assets:
@@ -55,12 +74,19 @@ for message in consumer:
 
     scanned_assets.add(asset)
 
-    # wait for asset to be stored
+    # wait for DB consistency
     time.sleep(1)
 
-    logger.info(f"Scanning ports → {asset}")
+    logger.info(f"🔍 Scanning ports → {asset}")
+    send_log(f"🔍 Scanning ports → {asset}", scan_id)
 
-    ports = scan_ports(asset)
+    try:
+        ports = scan_ports(asset)
+
+    except Exception as e:
+        logger.error(f"Port scanner failed for {asset}: {e}")
+        send_log(f"❌ Port scan failed → {asset}", scan_id)
+        continue
 
     db = SessionLocal()
 
@@ -68,25 +94,44 @@ for message in consumer:
 
         for port in ports:
 
-            store_port_scan_result(db, asset, port)
+            try:
+                # ---------------- STORE IN POSTGRES ----------------
+                store_port_scan_result(db, asset, port)
 
-            port_event = {
-                "scan_id": scan_id,
-                "event_type": "port_open",
-                "asset": asset,
-                "port": port
-            }
+                # ---------------- GRAPH (NEO4J) ----------------
+                graph.add_port(asset, port)
 
-            producer.send("port-scan-events", port_event)
-            producer.flush()
+                # ---------------- KAFKA EVENT ----------------
+                port_event = {
+                    "scan_id": scan_id,
+                    "event_type": "port_open",
+                    "asset": asset,
+                    "port": port
+                }
 
-            logger.info(f"Port event sent → {asset}:{port}")
+                producer.send("port-scan-events", port_event)
+
+                send_log(f"🔓 Open port → {asset}:{port}", scan_id)
+                
+                logger.info(f"✅ Port event sent → {asset}:{port}")
+
+            except Exception as e:
+                logger.error(f"Error processing port {port} for {asset}: {e}")
+
+        producer.flush()
+        db.commit()
+
+        logger.info(f"✅ Port scan completed → {asset}")
+        send_log(f"✅ Port scan completed → {asset}", scan_id)
 
     except Exception as e:
 
-        logger.error("Port scan worker crashed")
+        db.rollback()
+
+        logger.error("❌ Port scan worker crashed")
         logger.error(e)
 
+        send_log(f"❌ Port scan crashed → {asset}", scan_id)
+        
     finally:
-
         db.close()

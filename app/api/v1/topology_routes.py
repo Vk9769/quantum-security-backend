@@ -1,36 +1,46 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
+from typing import Optional
 from app.services.graph_service import GraphService
 
 router = APIRouter()
 
+# Reusable graph service (Neo4j)
+graph_service = GraphService()
+
 
 # =====================================================
-# NETWORK TOPOLOGY GRAPH (NEO4J)
+# NETWORK TOPOLOGY GRAPH (DOMAIN BASED)
 # =====================================================
 
 @router.get("/topology")
-def get_topology():
+def get_topology(domain: Optional[str] = Query(None)):
 
-    graph = GraphService()
+    """
+    Fetch topology graph
+    - If domain is provided → return only that domain graph
+    - Else → return full graph (fallback)
+    """
 
     try:
-        data = graph.get_topology()
 
-        # Ensure frontend always gets valid format
+        # 🔥 IMPORTANT: pass domain to service
+        data = graph_service.get_topology(domain=domain)
+
         if not data:
             return {
                 "nodes": [],
-                "links": []
+                "edges": []
             }
 
-        return data
-
-    except Exception as e:
         return {
-            "nodes": [],
-            "links": [],
-            "error": str(e)
+            "nodes": data.get("nodes", []),
+            "edges": data.get("edges", [])
         }
 
-    finally:
-        graph.close()
+    except Exception as e:
+
+        return {
+            "nodes": [],
+            "edges": [],
+            "error": str(e)
+        }
