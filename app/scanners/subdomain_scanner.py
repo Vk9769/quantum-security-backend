@@ -22,6 +22,12 @@ def is_ip(target):
         return True
     except:
         return False
+    
+def resolve_ip(hostname):
+    try:
+        return socket.gethostbyname(hostname)
+    except Exception:
+        return None
 
 
 # -----------------------------
@@ -172,15 +178,16 @@ def dns_bruteforce(domain):
 # Master discovery function
 # -----------------------------
 def discover_subdomains(target):
-
     found = set()
+    results = []
 
     # If target is IP skip subdomain discovery
     if is_ip(target):
-
         logger.info("Target is IP → skipping subdomain enumeration")
-
-        return [target]
+        return [{
+            "subdomain": target,
+            "ip_address": target
+        }]
 
     sources = [
         crtsh_enum,
@@ -190,45 +197,42 @@ def discover_subdomains(target):
     ]
 
     for source in sources:
-
         try:
+            subs = source(target)
 
-            results = source(target)
-
-            for sub in results:
-
-                sub = sub.replace("*.", "")
-                found.add(sub.lower())
+            for sub in subs:
+                sub = sub.replace("*.", "").lower().strip()
+                if sub:
+                    found.add(sub)
 
         except Exception as e:
-
             logger.warning(f"{source.__name__} failed → {e}")
 
-    # ---------------------------------
     # ASN Infrastructure Discovery
-    # ---------------------------------
-
     try:
-
         asns = get_asn(target)
-
         logger.info(f"Discovered ASNs → {asns}")
 
         for asn in asns:
-
             prefixes = get_asn_prefixes(asn)
 
             for prefix in prefixes[:3]:
-
                 hosts = reverse_dns(prefix)
 
                 for h in hosts:
-
+                    h = h.lower().strip()
                     if target in h:
-                        found.add(h.lower())
+                        found.add(h)
 
     except Exception as e:
-
         logger.warning(f"ASN discovery failed → {e}")
 
-    return sorted(found)
+    # Resolve IPs
+    for sub in sorted(found):
+        ip = resolve_ip(sub)
+        results.append({
+            "subdomain": sub,
+            "ip_address": ip
+        })
+
+    return results

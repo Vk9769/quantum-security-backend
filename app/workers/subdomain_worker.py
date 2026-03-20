@@ -109,7 +109,7 @@ for message in consumer:
         scan_id = event.get("scan_id")
         
         if not scan_id:
-            logger.warning(f"No scan_id for {target}")
+            logger.warning("No scan_id in incoming event")
     
         target = event.get("domain")
 
@@ -137,9 +137,13 @@ for message in consumer:
             assets = [target]
 
         # ---------------- PROCESS EACH ASSET ----------------
-        for asset in assets:
+        for item in assets:
 
-            asset = asset.lower().strip()
+            asset = item.get("subdomain", "").lower().strip()
+            ip_address = item.get("ip_address")
+
+            if not asset:
+                continue
 
             if "*" in asset or " " in asset or "/" in asset:
                 continue
@@ -150,7 +154,8 @@ for message in consumer:
                     db,
                     event.get("organization_id") or "10024715-cd08-49a4-b316-4f394c14d267",
                     target,
-                    asset
+                    asset,
+                    ip_address
                 )
 
                 if not sub_record:
@@ -170,8 +175,11 @@ for message in consumer:
                 )
 
                 # LIVE UI
-                send_log(f"🌐 Found subdomain → {asset}", scan_id)
-                
+                if ip_address:
+                    send_log(f"🌐 Found subdomain → {asset} [{ip_address}]", scan_id)
+                else:
+                    send_log(f"🌐 Found subdomain → {asset}", scan_id)
+
             except Exception as e:
                 logger.error(f"Error processing asset {asset}: {e}")
 
