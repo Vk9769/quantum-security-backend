@@ -54,6 +54,43 @@ CREATE TABLE IF NOT EXISTS public.api_services
     CONSTRAINT api_services_pkey PRIMARY KEY (id)
 );
 
+CREATE TABLE IF NOT EXISTS public.asset_fingerprints
+(
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    asset_id uuid NOT NULL,
+    hosting_provider text COLLATE pg_catalog."default",
+    cloud_provider text COLLATE pg_catalog."default",
+    region text COLLATE pg_catalog."default",
+    web_server text COLLATE pg_catalog."default",
+    backend_stack text COLLATE pg_catalog."default",
+    framework text COLLATE pg_catalog."default",
+    cms text COLLATE pg_catalog."default",
+    waf_cdn text COLLATE pg_catalog."default",
+    dns_provider text COLLATE pg_catalog."default",
+    email_provider text COLLATE pg_catalog."default",
+    load_balancer text COLLATE pg_catalog."default",
+    os_hint text COLLATE pg_catalog."default",
+    deployment_type text COLLATE pg_catalog."default",
+    reverse_dns text COLLATE pg_catalog."default",
+    asn text COLLATE pg_catalog."default",
+    org_name text COLLATE pg_catalog."default",
+    confidence_score double precision,
+    raw_headers jsonb,
+    raw_dns jsonb,
+    raw_tls jsonb,
+    raw_whois jsonb,
+    detected_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    web_server_detection_method text COLLATE pg_catalog."default",
+    web_server_candidates jsonb,
+    passive_technology_matches jsonb,
+    http_observations jsonb,
+    favicon_hash jsonb,
+    behavioral_fingerprint jsonb,
+    evidence_summary jsonb,
+    external_exposure_summary jsonb,
+    CONSTRAINT asset_fingerprints_pkey PRIMARY KEY (id)
+);
+
 CREATE TABLE IF NOT EXISTS public.asset_metadata
 (
     asset_id uuid NOT NULL,
@@ -414,6 +451,15 @@ ALTER TABLE IF EXISTS public.api_services
     REFERENCES public.asset_registry (id) MATCH SIMPLE
     ON UPDATE NO ACTION
     ON DELETE CASCADE;
+
+
+ALTER TABLE IF EXISTS public.asset_fingerprints
+    ADD CONSTRAINT asset_fingerprints_asset_id_fkey FOREIGN KEY (asset_id)
+    REFERENCES public.asset_registry (id) MATCH SIMPLE
+    ON UPDATE NO ACTION
+    ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_asset_fingerprint_asset
+    ON public.asset_fingerprints(asset_id);
 
 
 ALTER TABLE IF EXISTS public.asset_metadata
