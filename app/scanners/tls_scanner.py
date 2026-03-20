@@ -26,10 +26,79 @@ JA3_CLIENTS = [
 ]
 
 
-def browser_tls_probe(host):
+# -----------------------------------
+# Helpers
+# -----------------------------------
+
+def safe_signature_algorithm(cert):
+    try:
+        if cert.signature_algorithm_oid and cert.signature_algorithm_oid._name:
+            return cert.signature_algorithm_oid._name
+    except Exception:
+        pass
 
     try:
+        if cert.signature_hash_algorithm and cert.signature_hash_algorithm.name:
+            return cert.signature_hash_algorithm.name
+    except Exception:
+        pass
 
+    return None
+
+
+def safe_public_key_type(cert):
+    try:
+        return cert.public_key().__class__.__name__
+    except Exception:
+        return None
+
+
+def safe_public_key_size(cert):
+    try:
+        return cert.public_key().key_size
+    except Exception:
+        return None
+
+
+def detect_pqc(value):
+    if not value:
+        return "CLASSICAL_OR_UNCONFIRMED"
+
+    text = str(value).upper()
+
+    pqc_algorithms = [
+        "MLKEM",
+        "KYBER",
+        "FRODOKEM",
+        "BIKE",
+        "NTRU",
+        "HYBRID"
+    ]
+
+    for algo in pqc_algorithms:
+        if algo in text:
+            return "POST_QUANTUM_OR_HYBRID"
+
+    return "CLASSICAL"
+
+
+def merge_results(base, extra):
+    if not extra:
+        return base
+
+    for k, v in extra.items():
+        if v is not None and (base.get(k) is None or base.get(k) in ["UNKNOWN", [], ""]):
+            base[k] = v
+
+    return base
+
+
+# -----------------------------------
+# Browser JA3 probe
+# -----------------------------------
+
+def browser_tls_probe(host):
+    try:
         client = random.choice(JA3_CLIENTS)
 
         session = tls_client.Session(
@@ -37,38 +106,18 @@ def browser_tls_probe(host):
             random_tls_extension_order=True
         )
 
-        r = session.get(
+        session.get(
             f"https://{host}",
             timeout_seconds=10
         )
 
-        sock = r.raw.connection.sock if hasattr(r.connection, "sock") else None
-
-        if not sock:
-            return None
-
-        cipher = sock.cipher()
-
-        der_cert = sock.getpeercert(True)
-
-        cert = x509.load_der_x509_certificate(
-            der_cert,
-            default_backend()
-        )
-
-        issuer = cert.issuer.rfc4514_string()
-        subject = cert.subject.rfc4514_string()
-        expiry = cert.not_valid_after_utc
+        # tls_client does not reliably expose the raw socket in a portable way.
+        # So use this probe only as proof browser-like TLS works, then fallback
+        # to Python socket for actual cert/cipher extraction.
+        logger.info(f"Browser JA3 HTTPS probe succeeded → {host}")
 
         return {
-            "tls_version": sock.version(),
-            "cipher_suite": cipher[0],
-            "key_exchange": cipher[1],
-            "certificate_issuer": issuer,
-            "certificate_subject": subject,
-            "expiry": expiry.isoformat(),
-            "signature_algorithm": cert.signature_algorithm_oid._name or cert.signature_hash_algorithm.name,
-            "key_size": cert.public_key().key_size
+            "browser_probe": True
         }
 
     except Exception as e:
@@ -76,48 +125,54 @@ def browser_tls_probe(host):
 
     return None
 
+
+# -----------------------------------
+# Python TLS socket
+# -----------------------------------
+
 def python_tls_socket(host):
-
     try:
-
         context = ssl.create_default_context()
 
         with socket.create_connection((host, 443), timeout=10) as sock:
-
             with context.wrap_socket(sock, server_hostname=host) as ssock:
-
                 cert_bin = ssock.getpeercert(True)
 
                 cert = x509.load_der_x509_certificate(
                     cert_bin,
                     default_backend()
                 )
+
                 expiry = cert.not_valid_after_utc
+                cipher = ssock.cipher() or (None, None, None)
+
                 return {
                     "tls_version": ssock.version(),
-                    "cipher_suite": ssock.cipher()[0],
+                    "cipher_suite": cipher[0],
+                    "cipher_protocol": cipher[1],
+                    "cipher_bits": cipher[2],
                     "key_exchange": None,
                     "certificate_issuer": cert.issuer.rfc4514_string(),
                     "certificate_subject": cert.subject.rfc4514_string(),
                     "expiry": expiry.isoformat(),
-                    "signature_algorithm": cert.signature_algorithm_oid._name or cert.signature_hash_algorithm.name,
-                    "key_size": cert.public_key().key_size
+                    "signature_algorithm": safe_signature_algorithm(cert),
+                    "key_size": safe_public_key_size(cert),
+                    "public_key_type": safe_public_key_type(cert),
+                    "quantum_security": detect_pqc(cipher[0])
                 }
 
     except Exception as e:
-
         logger.warning(f"Python TLS socket failed → {host} | {e}")
 
     return None
+
 
 # -----------------------------------
 # ZGrab HTTP TLS (Browser Cipher List)
 # -----------------------------------
 
 def zgrab_http_tls(host):
-
     try:
-
         ip = socket.gethostbyname(host)
 
         cmd = [
@@ -143,40 +198,65 @@ def zgrab_http_tls(host):
         )
 
         input_data = f"{ip},{host},443\n"
-
         stdout, stderr = process.communicate(input=input_data)
 
         for line in stdout.splitlines():
-
             if not line.startswith("{"):
                 continue
 
             data = json.loads(line)
 
             http = data.get("data", {}).get("http")
-
             if not http:
                 continue
 
             tls = http.get("tls")
-
             if not tls:
                 continue
 
-            handshake = tls["handshake_log"]
-            server = handshake["server_hello"]
+            handshake = tls.get("handshake_log", {})
+            server = handshake.get("server_hello", {})
+            cert = handshake.get("server_certificates", {}).get("certificate", {}).get("parsed", {})
 
-            cert = handshake["server_certificates"]["certificate"]["parsed"]
+            issuer_cn = None
+            subject_cn = None
+            sig_alg = None
+            key_size = None
 
-            return {
+            try:
+                issuer_cn = cert.get("issuer", {}).get("common_name")
+            except Exception:
+                pass
+
+            try:
+                subject_cn = cert.get("subject", {}).get("common_name")
+            except Exception:
+                pass
+
+            try:
+                sig_alg = cert.get("signature_algorithm", {}).get("name")
+            except Exception:
+                pass
+
+            try:
+                key_size = cert.get("subject_key_info", {}).get("key_length")
+            except Exception:
+                pass
+
+            result = {
                 "tls_version": server.get("version"),
                 "cipher_suite": server.get("cipher_suite"),
                 "key_exchange": server.get("key_exchange"),
-                "certificate_issuer": cert["issuer"]["common_name"],
-                "certificate_subject": cert["subject"]["common_name"],
-                "signature_algorithm": cert["signature_algorithm"]["name"],
-                "key_size": cert["subject_key_info"]["key_length"]
+                "certificate_issuer": issuer_cn,
+                "certificate_subject": subject_cn,
+                "signature_algorithm": sig_alg,
+                "key_size": key_size,
+                "quantum_security": detect_pqc(
+                    f"{server.get('key_exchange', '')} {server.get('cipher_suite', '')}"
+                )
             }
+
+            return result
 
     except Exception as e:
         logger.warning(f"ZGrab HTTP TLS failed → {host} | {e}")
@@ -189,9 +269,7 @@ def zgrab_http_tls(host):
 # -----------------------------------
 
 def zgrab_tls(host):
-
     try:
-
         ip = socket.gethostbyname(host)
 
         cmd = [
@@ -212,16 +290,13 @@ def zgrab_tls(host):
         )
 
         input_data = f"{ip},{host},443\n"
-
         stdout, stderr = process.communicate(input=input_data)
 
         for line in stdout.splitlines():
-
             if not line.startswith("{"):
                 continue
 
             data = json.loads(line)
-
             tls = data.get("data", {}).get("tls")
 
             if not tls:
@@ -230,14 +305,19 @@ def zgrab_tls(host):
             if tls.get("status") != "success":
                 continue
 
-            handshake = tls["result"]["handshake_log"]
-            server = handshake["server_hello"]
+            handshake = tls.get("result", {}).get("handshake_log", {})
+            server = handshake.get("server_hello", {})
 
-            return {
+            result = {
                 "tls_version": server.get("version"),
                 "cipher_suite": server.get("cipher_suite"),
-                "key_exchange": server.get("key_exchange")
+                "key_exchange": server.get("key_exchange"),
+                "quantum_security": detect_pqc(
+                    f"{server.get('key_exchange', '')} {server.get('cipher_suite', '')}"
+                )
             }
+
+            return result
 
     except Exception as e:
         logger.warning(f"ZGrab TLS failed → {host} | {e}")
@@ -250,17 +330,13 @@ def zgrab_tls(host):
 # -----------------------------------
 
 def openssl_tls(host):
-
     try:
-
         cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "alpine",
-            "sh",
-            "-c",
-            f"apk add --no-cache openssl >/dev/null 2>&1 && openssl s_client -connect {host}:443 -servername {host} -showcerts"
+            "openssl",
+            "s_client",
+            "-connect", f"{host}:443",
+            "-servername", host,
+            "-showcerts"
         ]
 
         result = subprocess.run(
@@ -270,7 +346,7 @@ def openssl_tls(host):
             timeout=25
         )
 
-        output = result.stdout
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
 
         issuer = None
         subject = None
@@ -282,7 +358,6 @@ def openssl_tls(host):
         key_exchange = None
 
         for line in output.splitlines():
-
             line = line.strip()
 
             if line.startswith("subject="):
@@ -291,38 +366,63 @@ def openssl_tls(host):
             elif line.startswith("issuer="):
                 issuer = line.replace("issuer=", "").strip()
 
+            elif line.startswith("Protocol  :"):
+                tls_version = line.split(":", 1)[1].strip()
+
             elif line.startswith("Protocol:"):
-                tls_version = line.split(":",1)[1].strip()
+                tls_version = line.split(":", 1)[1].strip()
+
+            elif line.startswith("Cipher    :"):
+                cipher = line.split(":", 1)[1].strip()
 
             elif line.startswith("Cipher is"):
-                cipher = line.split("Cipher is")[1].strip()
+                try:
+                    cipher = line.split("Cipher is", 1)[1].strip()
+                except Exception:
+                    pass
+
+            elif "Server Temp Key:" in line:
+                try:
+                    key_exchange = line.split(":", 1)[1].strip()
+                except Exception:
+                    pass
+
+            elif "Peer signature type:" in line:
+                try:
+                    signature_algorithm = line.split(":", 1)[1].strip()
+                except Exception:
+                    pass
+
+            elif "sigalg:" in line.lower():
+                try:
+                    signature_algorithm = line.split("sigalg:", 1)[1].strip().split()[0]
+                except Exception:
+                    pass
 
             elif "PKEY:" in line and "bit" in line:
                 try:
-                    key_size = int(line.split(",")[1].split("(")[0].strip())
-                except:
+                    parts = line.split(",")
+                    for part in parts:
+                        if "bit" in part.lower():
+                            digits = "".join(ch for ch in part if ch.isdigit())
+                            if digits:
+                                key_size = int(digits)
+                                break
+                except Exception:
                     pass
-
-            elif "sigalg:" in line.lower() or "Peer signature type" in line:
-                try:
-                    if "sigalg:" in line.lower():
-                        signature_algorithm = line.split("sigalg:")[1].strip().split()[0]
-                    elif "Peer signature type:" in line:
-                        signature_algorithm = line.split(":")[1].strip()
-                except:
-                    signature_algorithm = None
 
             elif "NotAfter:" in line:
-                expiry = line.split("NotAfter:")[1].strip()
-
-            elif "TLS1.3 group" in line or "Negotiated TLS1.3 group" in line:
                 try:
-                    key_exchange = line.split(":")[1].strip()
-                except:
+                    expiry = line.split("NotAfter:", 1)[1].strip()
+                except Exception:
                     pass
 
+            elif "TLS1.3 group:" in line or "Negotiated TLS1.3 group:" in line:
+                try:
+                    key_exchange = line.split(":", 1)[1].strip()
+                except Exception:
+                    pass
 
-        # RETURN OUTSIDE LOOP
         return {
             "tls_version": tls_version,
             "cipher_suite": cipher,
@@ -331,84 +431,104 @@ def openssl_tls(host):
             "certificate_issuer": issuer,
             "signature_algorithm": signature_algorithm,
             "key_size": key_size,
-            "expiry": expiry
+            "expiry": expiry,
+            "quantum_security": detect_pqc(
+                f"{key_exchange or ''} {cipher or ''}"
+            )
         }
 
     except Exception as e:
-
         logger.warning(f"OpenSSL TLS failed → {host} | {e}")
 
     return None
 
+
+# -----------------------------------
+# Nmap TLS Enumeration
+# -----------------------------------
+
 def nmap_tls_scan(host):
+    try:
+        cmd = [
+            "nmap",
+            "-p", "443",
+            "--script", "ssl-cert,ssl-enum-ciphers",
+            host
+        ]
 
-    cmd = [
-        "nmap",
-        "-p", "443",
-        "--script", "ssl-cert,ssl-enum-ciphers",
-        host
-    ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=40
+        )
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=40
-    )
+        output = result.stdout or ""
 
-    output = result.stdout
+        tls_version = None
+        cipher = None
+        pqc_algorithm = None
+        signature_algorithm = None
 
-    tls_version = None
-    cipher = None
-    pqc_algorithm = None
-    signature_algorithm = None  
+        for line in output.splitlines():
+            line = line.strip()
 
-    for line in output.splitlines():
+            if "TLSv1.3:" in line:
+                tls_version = "TLSv1.3"
+            elif "TLSv1.2:" in line and not tls_version:
+                tls_version = "TLSv1.2"
 
-        line = line.strip()
+            if "TLS_" in line:
+                cipher = line.replace("|", "").strip().split(" - ")[0]
 
-        if "TLSv1.3:" in line:
-            tls_version = "TLSv1.3"
+                if "(" in line and ")" in line:
+                    try:
+                        pqc_algorithm = line.split("(", 1)[1].split(")", 1)[0]
+                    except Exception:
+                        pass
 
-        if "TLS_" in line:
-            cipher = line.replace("|","").strip().split(" - ")[0]
+            if "Signature Algorithm:" in line:
+                try:
+                    signature_algorithm = line.split("Signature Algorithm:", 1)[1].strip()
+                except Exception:
+                    pass
 
-            if "(" in line:
-                pqc_algorithm = line.split("(")[1].split(")")[0]
+        return {
+            "tls_version": tls_version,
+            "cipher_suite": cipher,
+            "key_exchange": pqc_algorithm,
+            "signature_algorithm": signature_algorithm,
+            "quantum_security": detect_pqc(
+                (pqc_algorithm or "") + " " + (cipher or "")
+            )
+        }
 
-        if "Signature Algorithm:" in line:
-            signature_algorithm = line.split("Signature Algorithm:")[1].strip()
+    except Exception as e:
+        logger.warning(f"Nmap TLS scan failed → {host} | {e}")
+        return None
 
-    return {
-        "tls_version": tls_version,
-        "cipher_suite": cipher,
-        "key_exchange": pqc_algorithm,
-        "signature_algorithm": signature_algorithm
-    }
+
+# -----------------------------------
+# Passive certificate lookups
+# -----------------------------------
 
 def shodan_certificate_lookup(host):
-
     try:
+        api_key = os.getenv("SHODAN_API_KEY")
+        if not api_key:
+            return None
 
-        API = os.getenv("SHODAN_API_KEY")
-
-        url = f"https://api.shodan.io/shodan/host/{host}?key={API}"
-
+        url = f"https://api.shodan.io/shodan/host/{host}?key={api_key}"
         r = requests.get(url, timeout=20)
-
         data = r.json()
 
         for item in data.get("data", []):
-
             ssl_data = item.get("ssl")
-
             if not ssl_data:
                 continue
 
             cert = ssl_data.get("cert")
-
             if cert:
-
                 return {
                     "certificate_subject": cert.get("subject"),
                     "certificate_issuer": cert.get("issuer"),
@@ -419,14 +539,9 @@ def shodan_certificate_lookup(host):
     except Exception:
         return None
 
-# -----------------------------------
-# CT Log Certificate Fallback
-# -----------------------------------
 
 def crtsh_certificate_probe(host):
-
     try:
-
         url = f"https://crt.sh/?q=%25.{host}&output=json"
 
         r = requests.get(
@@ -439,7 +554,6 @@ def crtsh_certificate_probe(host):
             return None
 
         data = r.json()
-
         if not data:
             return None
 
@@ -453,13 +567,12 @@ def crtsh_certificate_probe(host):
         }
 
     except Exception as e:
-
         logger.warning(f"CT log lookup failed → {host} | {e}")
 
     return None
 
-def ct_log_certificate_probe(host):
 
+def ct_log_certificate_probe(host):
     sources = [
         f"https://crt.sh/?q=%25.{host}&output=json",
         f"https://ct.cloudflare.com/logs/cirrus/search?domain={host}",
@@ -468,9 +581,7 @@ def ct_log_certificate_probe(host):
     ]
 
     for url in sources:
-
         try:
-
             r = requests.get(
                 url,
                 timeout=20,
@@ -481,7 +592,6 @@ def ct_log_certificate_probe(host):
                 continue
 
             data = r.json()
-
             if not data:
                 continue
 
@@ -499,17 +609,17 @@ def ct_log_certificate_probe(host):
 
     return None
 
+
 def censys_certificate_lookup(host):
-
     try:
-
-
-        API_TOKEN = os.getenv("CENSYS_API_TOKEN")
+        api_token = os.getenv("CENSYS_API_TOKEN")
+        if not api_token:
+            return None
 
         url = f"https://search.censys.io/api/v2/hosts/{host}"
 
         headers = {
-            "Authorization": f"Bearer {API_TOKEN}",
+            "Authorization": f"Bearer {api_token}",
             "Accept": "application/json"
         }
 
@@ -523,14 +633,11 @@ def censys_certificate_lookup(host):
         services = data.get("result", {}).get("services", [])
 
         for service in services:
-
             tls = service.get("tls")
-
             if not tls:
                 continue
 
             cert = tls.get("certificates", {}).get("leaf_data")
-
             if not cert:
                 continue
 
@@ -543,8 +650,12 @@ def censys_certificate_lookup(host):
 
     except Exception:
         return None
-    
-    
+
+
+# -----------------------------------
+# Cloud probe
+# -----------------------------------
+
 PROXIES = [
     "http://aws-proxy-ip:8080",
     "http://azure-proxy-ip:8080",
@@ -553,12 +664,10 @@ PROXIES = [
 
 
 def cloud_tls_probe(host):
-
     try:
-
         proxy = random.choice(PROXIES)
 
-        r = requests.get(
+        requests.get(
             f"https://{host}",
             proxies={"https": proxy},
             timeout=10,
@@ -569,158 +678,201 @@ def cloud_tls_probe(host):
 
     except Exception:
         return None
-    
-def detect_pqc(cipher):
 
-    if not cipher:
-        return "UNKNOWN"
 
-    pqc_algorithms = [
-        "MLKEM",
-        "KYBER",
-        "FRODOKEM",
-        "BIKE",
-        "NTRU"
+# -----------------------------------
+# Protocol support probing
+# -----------------------------------
+
+def probe_supported_tls_versions(host):
+    supported = []
+
+    versions = [
+        ("TLSv1.0", ssl.TLSVersion.TLSv1),
+        ("TLSv1.1", ssl.TLSVersion.TLSv1_1),
+        ("TLSv1.2", ssl.TLSVersion.TLSv1_2),
     ]
 
-    for algo in pqc_algorithms:
+    tls13_supported = hasattr(ssl.TLSVersion, "TLSv1_3")
+    if tls13_supported:
+        versions.append(("TLSv1.3", ssl.TLSVersion.TLSv1_3))
 
-        if cipher and algo in cipher.upper():
-            return "POST_QUANTUM"
+    for version_name, version_obj in versions:
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            context.minimum_version = version_obj
+            context.maximum_version = version_obj
 
-    return "CLASSICAL"
+            with socket.create_connection((host, 443), timeout=5) as sock:
+                with context.wrap_socket(sock, server_hostname=host):
+                    supported.append(version_name)
+
+        except Exception:
+            pass
+
+    return supported
+
 
 # -----------------------------------
 # MASTER TLS SCANNER
 # -----------------------------------
 
 def scan_tls(host):
-
     logger.info(f"TLS scan starting → {host}")
 
+    final_result = {
+        "tls_version": None,
+        "supported_tls_versions": [],
+        "cipher_suite": None,
+        "cipher_protocol": None,
+        "cipher_bits": None,
+        "key_exchange": None,
+        "certificate_issuer": None,
+        "certificate_subject": None,
+        "expiry": None,
+        "signature_algorithm": None,
+        "key_size": None,
+        "public_key_type": None,
+        "quantum_security": "CLASSICAL_OR_UNCONFIRMED",
+        "browser_probe": False
+    }
+
     # 1 Browser JA3 probe
-    result = browser_tls_probe(host)
+    browser_result = browser_tls_probe(host)
+    if browser_result:
+        final_result["browser_probe"] = True
+        logger.info("TLS browser-style probe succeeded")
 
-    if result:
-        logger.info("TLS success via Browser JA3")
-        return result
-
-   
     # 2 Python TLS socket
     socket_result = python_tls_socket(host)
-
     if socket_result:
         logger.info("TLS success via Python socket")
+        final_result = merge_results(final_result, socket_result)
 
-        # Try OpenSSL to extract TLS group (PQC detection)
-        openssl_result = openssl_tls(host)
+    # 3 OpenSSL enrichment
+    openssl_result = openssl_tls(host)
+    if openssl_result:
+        logger.info("TLS enrichment via OpenSSL")
+        final_result = merge_results(final_result, openssl_result)
 
-        if openssl_result:
-            socket_result["key_exchange"] = openssl_result.get("key_exchange")
+    # 4 supported protocol versions
+    try:
+        final_result["supported_tls_versions"] = probe_supported_tls_versions(host)
+    except Exception as e:
+        logger.warning(f"TLS protocol support probe failed → {host} | {e}")
 
-        return socket_result
+    # If we already got strong active results, return now
+    if final_result.get("tls_version") or final_result.get("cipher_suite"):
+        final_result["quantum_security"] = detect_pqc(
+            f"{final_result.get('key_exchange', '')} {final_result.get('cipher_suite', '')}"
+        )
+        return final_result
 
-    # 3 Cloud probe
+    # 5 Cloud probe
     cloud = cloud_tls_probe(host)
-
     if cloud:
         logger.info("Cloud probe succeeded")
 
-    # 4 ZGrab HTTP TLS
+    # 6 ZGrab HTTP TLS
     result = zgrab_http_tls(host)
-
     if result:
         logger.info("TLS success via ZGrab HTTP")
-        return result
+        final_result = merge_results(final_result, result)
+        final_result["quantum_security"] = detect_pqc(
+            f"{final_result.get('key_exchange', '')} {final_result.get('cipher_suite', '')}"
+        )
+        return final_result
 
-    # 5 ZGrab TLS
+    # 7 ZGrab TLS
     result = zgrab_tls(host)
-
     if result:
         logger.info("TLS success via ZGrab TLS")
-        return result
+        final_result = merge_results(final_result, result)
+        final_result["quantum_security"] = detect_pqc(
+            f"{final_result.get('key_exchange', '')} {final_result.get('cipher_suite', '')}"
+        )
+        return final_result
 
-    # 6 Nmap SSL enumeration
-  
+    # 8 Nmap SSL enumeration
     tls = nmap_tls_scan(host)
-
     if tls:
+        logger.info("TLS discovered via Nmap")
+        final_result = merge_results(final_result, tls)
 
         cert = openssl_tls(host)
+        if cert:
+            final_result = merge_results(final_result, cert)
 
-        for k, v in cert.items():
-            if v and not tls.get(k):
-                tls[k] = v
-
-        pqc_status = detect_pqc(
-            tls.get("key_exchange") or tls.get("cipher_suite")
+        final_result["quantum_security"] = detect_pqc(
+            final_result.get("key_exchange") or final_result.get("cipher_suite")
         )
+        return final_result
 
-        tls["quantum_security"] = pqc_status
-
-        logger.info(f"TLS discovered via Nmap → {pqc_status}")
-
-        return tls
-
-    # 7 OpenSSL
-    result = openssl_tls(host)
-
-    if result:
-        logger.info("TLS success via OpenSSL")
-        return result
-
-    # 8 Passive lookup (Censys)
+    # 9 Passive lookup (Censys)
     cert = censys_certificate_lookup(host)
-
     if cert:
         logger.info("Certificate found via Censys")
-        return {
+        final_result = merge_results(final_result, {
             "tls_version": "UNKNOWN",
             "cipher_suite": "UNKNOWN",
             "key_exchange": None,
             **cert
-        }
+        })
+        return final_result
 
-    # 9 Passive lookup (Shodan)
+    # 10 Passive lookup (Shodan)
     cert = shodan_certificate_lookup(host)
-
     if cert:
         logger.info("Certificate found via Shodan")
-        return {
+        final_result = merge_results(final_result, {
             "tls_version": "UNKNOWN",
             "cipher_suite": "UNKNOWN",
             "key_exchange": None,
             **cert
-        }
+        })
+        return final_result
 
-    # 10 CT logs
+    # 11 CT logs
     cert = ct_log_certificate_probe(host)
-
     if cert:
         logger.info("Certificate found via CT logs")
-        return {
+        final_result = merge_results(final_result, {
             "tls_version": "UNKNOWN",
             "cipher_suite": "UNKNOWN",
             "key_exchange": None,
             **cert
-        }
+        })
+        return final_result
 
-    # 11 crt.sh fallback
+    # 12 crt.sh fallback
     cert = crtsh_certificate_probe(host)
-
     if cert:
         logger.info("Certificate found via crt.sh")
-        return {
+        final_result = merge_results(final_result, {
             "tls_version": "UNKNOWN",
             "cipher_suite": "UNKNOWN",
             "key_exchange": None,
             **cert
-        }
+        })
+        return final_result
 
     logger.error("TLS scan completely failed")
 
     return {
         "tls_version": "UNKNOWN",
+        "supported_tls_versions": final_result.get("supported_tls_versions", []),
         "cipher_suite": "UNKNOWN",
-        "key_exchange": None
+        "cipher_protocol": None,
+        "cipher_bits": None,
+        "key_exchange": None,
+        "certificate_issuer": None,
+        "certificate_subject": None,
+        "expiry": None,
+        "signature_algorithm": None,
+        "key_size": None,
+        "public_key_type": None,
+        "quantum_security": "CLASSICAL_OR_UNCONFIRMED",
+        "browser_probe": final_result.get("browser_probe", False)
     }

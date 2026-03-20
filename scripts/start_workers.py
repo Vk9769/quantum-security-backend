@@ -7,6 +7,7 @@ workers = [
     "app.workers.port_scan_worker",
     "app.workers.tls_worker",
     "app.workers.certificate_worker",
+    "app.workers.fingerprint_worker",
     "app.workers.cbom_worker",
     "app.workers.risk_worker",
     "app.workers.alert_worker",

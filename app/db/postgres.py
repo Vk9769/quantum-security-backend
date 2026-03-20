@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 # -------------------------------------------------------
 # Load environment variables
 # -------------------------------------------------------
-
 load_dotenv()
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
@@ -19,7 +18,6 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "admin")
 # -------------------------------------------------------
 # Database URL
 # -------------------------------------------------------
-
 DATABASE_URL = (
     f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
     f"@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
@@ -28,7 +26,6 @@ DATABASE_URL = (
 # -------------------------------------------------------
 # SQLAlchemy Engine
 # -------------------------------------------------------
-
 engine = create_engine(
     DATABASE_URL,
     pool_size=10,
@@ -40,7 +37,6 @@ engine = create_engine(
 # -------------------------------------------------------
 # Session Factory
 # -------------------------------------------------------
-
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
@@ -50,13 +46,16 @@ SessionLocal = sessionmaker(
 # -------------------------------------------------------
 # Base Model for ORM
 # -------------------------------------------------------
-
 Base = declarative_base()
+
+# IMPORTANT:
+# Force-load model registry so SQLAlchemy relationships
+# like relationship("AssetFingerprint") can resolve.
+import app.models  # noqa: E402,F401
 
 # -------------------------------------------------------
 # Dependency for FastAPI
 # -------------------------------------------------------
-
 def get_db():
     db = SessionLocal()
     try:
@@ -67,7 +66,6 @@ def get_db():
 # -------------------------------------------------------
 # Database Connection Test
 # -------------------------------------------------------
-
 def test_connection():
     try:
         with engine.connect() as connection:

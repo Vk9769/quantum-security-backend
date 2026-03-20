@@ -36,6 +36,7 @@ consumer = KafkaConsumer(
     "port-scan-events",
     "tls-events",
     "certificate-events",
+    "fingerprint-events",
     "cbom-events",
     "vulnerability-events",
     "alert-events",
@@ -172,6 +173,24 @@ for message in consumer:
 
             logger.info(f"Asset discovered → {event['asset']}")
             send_log(f"🌐 Asset discovered → {event['asset']}", scan_id)
+            
+            
+            
+        elif event_type == "fingerprint_completed":
+
+            if not scan_id:
+                logger.warning("Skipping fingerprint event because scan_id not initialized")
+                continue
+
+            store_scan_event(
+                db,
+                scan_id,
+                "fingerprint_completed",
+                event
+            )
+
+            logger.info(f"Fingerprint completed → {event['asset']}")
+            send_log(f"🛰 Infra fingerprint completed → {event['asset']}", scan_id)
 
         # ------------------------------------
         # Port Scan
