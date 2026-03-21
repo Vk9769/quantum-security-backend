@@ -30,6 +30,75 @@ def send_log(message: str, scan_id: str = None):
     })
 
 
+# -------------------- HELPERS --------------------
+def normalize_asset(asset: str) -> str:
+    if not asset:
+        return ""
+    return (
+        str(asset).strip().lower()
+        .replace("https://", "")
+        .replace("http://", "")
+        .split(":")[0]
+        .strip("/")
+    )
+
+
+def get_asset_record_with_retry(db: Session, asset: str, retries: int = 2, delay: int = 2):
+    for attempt in range(retries + 1):
+        asset_record = db.query(AssetRegistry).filter(
+            AssetRegistry.asset_identifier == asset
+        ).first()
+
+        if asset_record:
+            return asset_record
+
+        if attempt < retries:
+            logger.warning(f"Asset not found → {asset}, retrying...")
+            time.sleep(delay)
+
+    return None
+
+
+def calculate_risk_score(base=0, quantum=False, vulnerability=False):
+    score = base
+
+    if vulnerability:
+        score += 70
+
+    if quantum:
+        score += 40
+
+    return min(score, 100)
+
+
+def get_quantum_risk_score(quantum_risk: str) -> int:
+    if quantum_risk == "CRITICAL":
+        return calculate_risk_score(base=80, quantum=True)
+
+    if quantum_risk == "NOT_QUANTUM_SAFE":
+        return calculate_risk_score(base=40, quantum=True)
+
+    if quantum_risk == "HYBRID_POST_QUANTUM":
+        return calculate_risk_score(base=10)
+
+    if quantum_risk == "POST_QUANTUM_SAFE":
+        return calculate_risk_score(base=0)
+
+    return calculate_risk_score(base=5)
+
+
+def is_pqc_ready(quantum_risk: str) -> bool:
+    return quantum_risk in ["HYBRID_POST_QUANTUM", "POST_QUANTUM_SAFE"]
+
+
+def get_alert_severity(quantum_risk: str) -> str:
+    if quantum_risk == "CRITICAL":
+        return "HIGH"
+    if quantum_risk == "NOT_QUANTUM_SAFE":
+        return "MEDIUM"
+    return "LOW"
+
+
 # -------------------- INIT --------------------
 graph = GraphService()
 ai_soc = AISOC()
@@ -59,22 +128,8 @@ logger.info("🚀 Risk Worker Started with AI SOC")
 print("Waiting for Kafka messages...")
 
 
-# -------------------- RISK CALCULATION --------------------
-def calculate_risk_score(base=0, quantum=False, vulnerability=False):
-    score = base
-
-    if vulnerability:
-        score += 70
-
-    if quantum:
-        score += 40
-
-    return min(score, 100)
-
-
 # -------------------- MAIN LOOP --------------------
 for message in consumer:
-
     event = message.value
     print("KAFKA MESSAGE RECEIVED:", event)
 
@@ -91,9 +146,8 @@ for message in consumer:
         # 1️⃣ VULNERABILITY EVENTS
         # ============================================
         if event_type == "vulnerability_detected":
-
-            asset = event.get("asset")
-            cve = event.get("cve")
+            asset = normalize_asset(event.get("asset"))
+            cve = event.get("cve") or "UNKNOWN"
 
             if not asset:
                 continue
@@ -117,12 +171,11 @@ for message in consumer:
                     scan_id
                 )
 
-            asset_record = db.query(AssetRegistry).filter(
-                AssetRegistry.asset_identifier == asset
-            ).first()
+            asset_record = get_asset_record_with_retry(db, asset)
 
             if not asset_record:
-                logger.warning(f"Asset not found → {asset}")
+                logger.warning(f"Asset missing → {asset}")
+                send_log(f"⚠ Asset not found for vulnerability → {asset}", scan_id)
                 continue
 
             store_asset_risk(db, asset_record.id, risk_score)
@@ -131,8 +184,7 @@ for message in consumer:
         # 2️⃣ CBOM / QUANTUM EVENTS
         # ============================================
         elif event_type == "cbom_generated":
-
-            asset = event.get("asset")
+            asset = normalize_asset(event.get("asset"))
 
             if not asset:
                 continue
@@ -146,51 +198,38 @@ for message in consumer:
                 f"⚛ Quantum Risk → {asset} | "
                 f"{event.get('signature_algorithm')} | {quantum_risk}"
             )
-
             send_log(f"⚛ Quantum risk → {asset} ({quantum_risk})", scan_id)
 
             # -------- Risk Score --------
-            if quantum_risk == "CRITICAL":
-                risk_score = calculate_risk_score(base=80, quantum=True)
-
-            elif quantum_risk == "NOT_QUANTUM_SAFE":
-                risk_score = calculate_risk_score(base=40, quantum=True)
-
-            elif quantum_risk == "HYBRID_POST_QUANTUM":
-                risk_score = calculate_risk_score(base=10)
-
-            elif quantum_risk == "POST_QUANTUM_SAFE":
-                risk_score = calculate_risk_score(base=0)
-
-            else:
-                risk_score = calculate_risk_score(base=5)
+            risk_score = get_quantum_risk_score(quantum_risk)
 
             logger.info(f"📊 Risk Score → {asset} = {risk_score}")
             send_log(f"📊 Risk score → {asset}: {risk_score}", scan_id)
 
             # -------- AI SOC --------
             try:
-                ai_result = ai_soc.analyze(event)
+                ai_result = ai_soc.analyze(event) or {}
+                attack_simulation = ai_result.get("attack_simulation", [])
+                recommendations = ai_result.get("recommendations", [])
+                attack_paths = ai_result.get("attack_paths", [])
 
-                logger.info(f"🤖 AI Attacks → {ai_result['attack_simulation']}")
-                logger.info(f"🧠 AI Recommendations → {ai_result['recommendations']}")
-                logger.info(f"🕸 Attack Paths → {ai_result['attack_paths']}")
+                logger.info(f"🤖 AI Attacks → {attack_simulation}")
+                logger.info(f"🧠 AI Recommendations → {recommendations}")
+                logger.info(f"🕸 Attack Paths → {attack_paths}")
 
             except Exception as e:
                 logger.error("AI SOC failed")
                 logger.error(e)
 
-                ai_result = {
-                    "attack_simulation": [],
-                    "recommendations": [],
-                    "attack_paths": []
-                }
+                attack_simulation = []
+                recommendations = []
+                attack_paths = []
 
             # -------- ALERT --------
             if quantum_risk in ["NOT_QUANTUM_SAFE", "CRITICAL"]:
                 send_alert(
                     asset,
-                    "MEDIUM",
+                    get_alert_severity(quantum_risk),
                     f"Quantum vulnerable crypto ({quantum_risk})",
                     scan_id
                 )
@@ -199,24 +238,21 @@ for message in consumer:
             graph.add_risk(asset, risk_score, quantum_risk)
 
             # -------- DATABASE --------
-            asset_record = db.query(AssetRegistry).filter(
-                AssetRegistry.asset_identifier == asset
-            ).first()
+            asset_record = get_asset_record_with_retry(db, asset)
 
             if not asset_record:
-                logger.warning(f"Retry asset → {asset}")
-                time.sleep(2)
+                logger.warning(f"Asset missing → {asset}")
+                send_log(f"⚠ Asset not found for CBOM → {asset}", scan_id)
+                continue
 
-                asset_record = db.query(AssetRegistry).filter(
-                    AssetRegistry.asset_identifier == asset
-                ).first()
+            algorithm = (
+                event.get("signature_algorithm")
+                or event.get("key_exchange")
+                or event.get("cipher_suite")
+                or "UNKNOWN"
+            )
 
-                if not asset_record:
-                    logger.warning(f"Asset missing → {asset}")
-                    continue
-
-            algorithm = event.get("signature_algorithm") or event.get("cipher_suite")
-            pqc_ready = quantum_risk != "NOT_QUANTUM_SAFE"
+            pqc_ready = is_pqc_ready(quantum_risk)
 
             store_pqc_analysis(db, asset_record.id, algorithm, pqc_ready)
             update_cbom_quantum_risk(db, asset_record.id, quantum_risk)
@@ -229,12 +265,14 @@ for message in consumer:
                 "asset": asset,
                 "quantum_risk": quantum_risk,
                 "risk_score": risk_score,
-                "attack_simulation": ai_result["attack_simulation"],
-                "recommendations": ai_result["recommendations"],
-                "attack_paths": ai_result["attack_paths"]
+                "pqc_ready": pqc_ready,
+                "attack_simulation": attack_simulation,
+                "recommendations": recommendations,
+                "attack_paths": attack_paths
             })
 
             logger.info(f"📤 AI event sent → {asset}")
+            send_log(f"✅ Risk processing completed → {asset}", scan_id)
 
     except Exception as e:
         db.rollback()

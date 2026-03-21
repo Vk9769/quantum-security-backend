@@ -1,3 +1,4 @@
+import os
 import requests
 import logging
 import socket
@@ -6,8 +7,15 @@ from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger("ASNScanner")
 
-BGPVIEW_API = "https://api.bgpview.io"
-IPINFO_API = "https://ipinfo.io"
+IPINFO_API = "https://api.ipinfo.io"
+IPINFO_TOKEN = os.getenv("IPINFO_TOKEN", "")
+
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "QuantumSecurityPlatform/1.0"
+})
+
+_IPINFO_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 # -----------------------------------
@@ -22,201 +30,211 @@ def is_ip(value: str) -> bool:
         return False
 
 
-# -----------------------------------
-# Resolve domain to IP
-# -----------------------------------
-
 def resolve_ip(domain: str) -> Optional[str]:
     try:
         ip = socket.gethostbyname(domain)
         logger.info(f"Resolved {domain} → {ip}")
         return ip
-
     except Exception as e:
         logger.warning(f"DNS resolution failed → {domain} | {e}")
         return None
 
 
+def clear_ipinfo_cache():
+    _IPINFO_CACHE.clear()
+    logger.info("IPinfo cache cleared")
+
+
+def _normalize_ipinfo_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not data:
+        return {}
+
+    # Rich /lookup format
+    if "as" in data or "geo" in data:
+        as_block = data.get("as", {}) or {}
+        geo_block = data.get("geo", {}) or {}
+
+        return {
+            "ip": data.get("ip"),
+            "asn": as_block.get("asn"),
+            "as_name": as_block.get("name"),
+            "as_domain": as_block.get("domain"),
+            "as_type": as_block.get("type"),
+            "route": data.get("route") or as_block.get("route"),
+            "country_code": geo_block.get("country_code"),
+            "city": geo_block.get("city"),
+            "region": geo_block.get("region"),
+            "company": as_block.get("name"),
+            "raw": data
+        }
+
+    # Lite format
+    return {
+        "ip": data.get("ip"),
+        "asn": data.get("asn"),
+        "as_name": data.get("as_name") or data.get("name"),
+        "as_domain": data.get("as_domain") or data.get("domain"),
+        "as_type": data.get("as_type"),
+        "route": data.get("as_route") or data.get("route"),
+        "country_code": data.get("country_code"),
+        "city": data.get("city"),
+        "region": data.get("region"),
+        "company": data.get("company"),
+        "raw": data
+    }
+
+
+def _fetch_ipinfo(url: str) -> Optional[Dict[str, Any]]:
+    headers = {"Authorization": f"Bearer {IPINFO_TOKEN}"}
+    r = SESSION.get(url, headers=headers, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+def ipinfo_lookup(ip: str, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
+    if not ip:
+        return None
+
+    if not force_refresh and ip in _IPINFO_CACHE:
+        return _IPINFO_CACHE[ip]
+
+    # always try rich lookup first
+    urls = [
+        f"{IPINFO_API}/lookup/{ip}",
+        f"{IPINFO_API}/lite/{ip}"
+    ]
+
+    for url in urls:
+        try:
+            data = _fetch_ipinfo(url)
+            normalized = _normalize_ipinfo_response(data)
+
+            # if lookup returned richer fields, cache that
+            _IPINFO_CACHE[ip] = normalized
+            logger.info(
+                f"IPinfo success → {ip} | endpoint={url} | "
+                f"asn={normalized.get('asn')} | "
+                f"name={normalized.get('as_name')} | "
+                f"type={normalized.get('as_type')} | "
+                f"route={normalized.get('route')}"
+            )
+            return normalized
+
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"IPinfo HTTP error → {url} | {e}")
+            continue
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"IPinfo request failed → {url} | {e}")
+            continue
+        except ValueError as e:
+            logger.warning(f"Invalid JSON from IPinfo → {url} | {e}")
+            continue
+
+    return None
+
+
 # -----------------------------------
-# Get ASN from domain using BGPView DNS API
-# -----------------------------------
-
-def get_asn(domain: str) -> List[int]:
-    logger.info(f"Finding ASN for domain → {domain}")
-
-    try:
-        url = f"{BGPVIEW_API}/dns/{domain}"
-        r = requests.get(url, timeout=15)
-
-        if r.status_code != 200:
-            logger.warning(f"BGPView DNS API returned {r.status_code}")
-            return []
-
-        data = r.json()
-        asns = []
-
-        for entry in data.get("data", {}).get("ipv4_addresses", []):
-            asn = entry.get("asn")
-            if asn:
-                try:
-                    asns.append(int(asn))
-                except Exception:
-                    pass
-
-        asns = list(set(asns))
-
-        logger.info(f"Discovered ASNs → {asns}")
-        return asns
-
-    except Exception as e:
-        logger.warning(f"ASN lookup failed for domain {domain} → {e}")
-        return []
-
-
-# -----------------------------------
-# Get ASN from IP using ipinfo
+# ASN functions
 # -----------------------------------
 
 def get_asn_from_ip(ip: str) -> Optional[int]:
     logger.info(f"Finding ASN for IP → {ip}")
 
-    try:
-        url = f"{IPINFO_API}/{ip}/json"
-        r = requests.get(url, timeout=10)
+    data = ipinfo_lookup(ip)
+    if not data:
+        return None
 
-        if r.status_code != 200:
-            logger.warning(f"ipinfo API returned {r.status_code}")
-            return None
+    asn_value = data.get("asn")
+    if not asn_value:
+        return None
 
-        data = r.json()
-        org = data.get("org", "")
-
-        # Example: "AS13335 Cloudflare, Inc."
-        if org.startswith("AS"):
-            first_part = org.split()[0].replace("AS", "").strip()
-            if first_part.isdigit():
-                asn = int(first_part)
-                logger.info(f"Resolved IP {ip} → ASN {asn}")
-                return asn
-
-    except Exception as e:
-        logger.warning(f"ASN lookup failed for IP {ip} → {e}")
+    asn_digits = str(asn_value).upper().replace("AS", "").strip()
+    if asn_digits.isdigit():
+        asn = int(asn_digits)
+        logger.info(f"Resolved IP {ip} → ASN {asn}")
+        return asn
 
     return None
 
-
-# -----------------------------------
-# Get org name from IP using ipinfo
-# -----------------------------------
 
 def get_asn_org(ip: str) -> Optional[str]:
     logger.info(f"Finding ASN org for IP → {ip}")
 
-    try:
-        url = f"{IPINFO_API}/{ip}/json"
-        r = requests.get(url, timeout=10)
+    data = ipinfo_lookup(ip)
+    if not data:
+        return None
 
-        if r.status_code != 200:
-            logger.warning(f"ipinfo org API returned {r.status_code}")
-            return None
+    asn = data.get("asn")
+    name = data.get("as_name")
 
-        data = r.json()
-        org = data.get("org")
+    if asn and name:
+        org = f"{asn} {name}"
+        logger.info(f"Resolved IP {ip} → Org {org}")
+        return org
 
-        if org:
-            logger.info(f"Resolved IP {ip} → Org {org}")
-            return org
-
-    except Exception as e:
-        logger.warning(f"ASN org lookup failed for IP {ip} → {e}")
-
-    return None
+    return name
 
 
-# -----------------------------------
-# Get company/provider name from ASN
-# -----------------------------------
+def get_asn_details_from_ip(ip: str) -> Dict[str, Any]:
+    logger.info(f"Fetching ASN details via IPinfo → {ip}")
 
-def get_asn_details(asn: int) -> Dict[str, Any]:
-    logger.info(f"Fetching ASN details for ASN {asn}")
-
-    try:
-        url = f"{BGPVIEW_API}/asn/{asn}"
-        r = requests.get(url, timeout=15)
-
-        if r.status_code != 200:
-            logger.warning(f"BGPView ASN details API returned {r.status_code}")
-            return {}
-
-        data = r.json().get("data", {})
-
-        result = {
-            "asn": data.get("asn"),
-            "name": data.get("name"),
-            "description": data.get("description_short"),
-            "country_code": data.get("country_code"),
-            "rir_name": data.get("rir_name"),
-        }
-
-        logger.info(f"ASN details fetched → {result}")
-        return result
-
-    except Exception as e:
-        logger.warning(f"ASN details lookup failed for ASN {asn} → {e}")
+    data = ipinfo_lookup(ip)
+    if not data:
         return {}
 
+    result = {
+        "asn": data.get("asn"),
+        "name": data.get("as_name"),
+        "description": data.get("as_domain"),
+        "country_code": data.get("country_code"),
+        "rir_name": None,
+        "type": data.get("as_type"),
+        "domain": data.get("as_domain"),
+        "route": data.get("route"),
+        "company": data.get("company"),
+        "city": data.get("city"),
+        "region": data.get("region"),
+    }
 
-# -----------------------------------
-# ASN Prefix Lookup
-# -----------------------------------
+    logger.info(f"ASN details fetched → {result}")
+    return result
 
-def get_asn_prefixes(asn: int) -> List[str]:
-    logger.info(f"Fetching prefixes for ASN {asn}")
 
+def get_asn_prefixes(ip: str) -> List[str]:
+    logger.info(f"Fetching prefixes for IP → {ip}")
+
+    data = ipinfo_lookup(ip)
+    if not data:
+        return [f"{ip}/32"] if ip else []
+
+    route = data.get("route")
+    if route:
+        logger.info(f"Using ASN route prefix → {route}")
+        return [route]
+
+    # fallback: derive /24 from IP if no route available
     try:
-        url = f"{BGPVIEW_API}/asn/{asn}/prefixes"
-        r = requests.get(url, timeout=15)
+        network = ipaddress.ip_network(f"{ip}/24", strict=False)
+        logger.info(f"Using derived prefix → {network}")
+        return [str(network)]
+    except Exception:
+        prefix = f"{ip}/32"
+        logger.info(f"Using fallback prefix → {prefix}")
+        return [prefix]
 
-        if r.status_code != 200:
-            logger.warning(f"BGPView prefix API returned {r.status_code}")
-            return []
 
-        data = r.json()
-        prefixes = []
+def get_asn(domain: str) -> List[int]:
+    logger.info(f"Finding ASN for domain → {domain}")
 
-        for p in data.get("data", {}).get("ipv4_prefixes", []):
-            prefix = p.get("prefix")
-            if prefix:
-                prefixes.append(prefix)
-
-        logger.info(f"Discovered {len(prefixes)} prefixes for ASN {asn}")
-        return prefixes
-
-    except Exception as e:
-        logger.warning(f"ASN prefix lookup failed → {e}")
+    ip = resolve_ip(domain)
+    if not ip:
         return []
 
+    asn = get_asn_from_ip(ip)
+    return [asn] if asn else []
 
-# -----------------------------------
-# Full ASN enrichment for host/domain/IP
-# -----------------------------------
 
 def enrich_asn(target: str) -> Dict[str, Any]:
-    """
-    Accepts:
-    - domain like example.com
-    - IP like 8.8.8.8
-
-    Returns:
-    {
-        "ip": "...",
-        "asns": [13335],
-        "primary_asn": 13335,
-        "org": "AS13335 Cloudflare, Inc.",
-        "asn_details": {...},
-        "prefixes": [...]
-    }
-    """
     result = {
         "ip": None,
         "asns": [],
@@ -233,28 +251,45 @@ def enrich_asn(target: str) -> Dict[str, Any]:
         if not ip:
             return result
 
-        # Domain path first
-        if not is_ip(target):
-            asns = get_asn(target)
+        # force refresh if you suspect stale cached lite response
+        data = ipinfo_lookup(ip, force_refresh=True)
+        if not data:
+            return result
+
+        asn_value = data.get("asn")
+        if asn_value:
+            asn_digits = str(asn_value).upper().replace("AS", "").strip()
+            if asn_digits.isdigit():
+                result["primary_asn"] = int(asn_digits)
+                result["asns"] = [int(asn_digits)]
+
+        if data.get("asn") and data.get("as_name"):
+            result["org"] = f"{data['asn']} {data['as_name']}"
         else:
-            asns = []
+            result["org"] = data.get("as_name")
 
-        # Fallback IP ASN
-        if not asns:
-            ip_asn = get_asn_from_ip(ip)
-            if ip_asn:
-                asns = [ip_asn]
+        result["asn_details"] = {
+            "asn": data.get("asn"),
+            "name": data.get("as_name"),
+            "description": data.get("as_domain"),
+            "country_code": data.get("country_code"),
+            "rir_name": None,
+            "type": data.get("as_type"),
+            "domain": data.get("as_domain"),
+            "route": data.get("route"),
+            "company": data.get("company"),
+            "city": data.get("city"),
+            "region": data.get("region"),
+        }
 
-        asns = list(set(asns))
-        result["asns"] = asns
-
-        if asns:
-            primary_asn = asns[0]
-            result["primary_asn"] = primary_asn
-            result["asn_details"] = get_asn_details(primary_asn)
-            result["prefixes"] = get_asn_prefixes(primary_asn)
-
-        result["org"] = get_asn_org(ip)
+        route = data.get("route")
+        if route:
+            result["prefixes"] = [route]
+        else:
+            try:
+                result["prefixes"] = [str(ipaddress.ip_network(f"{ip}/24", strict=False))]
+            except Exception:
+                result["prefixes"] = [f"{ip}/32"]
 
         return result
 

@@ -151,7 +151,7 @@ def python_tls_socket(host):
                     "cipher_suite": cipher[0],
                     "cipher_protocol": cipher[1],
                     "cipher_bits": cipher[2],
-                    "key_exchange": None,
+                    "key_exchange": None,   # Python ssl usually does not expose negotiated group
                     "certificate_issuer": cert.issuer.rfc4514_string(),
                     "certificate_subject": cert.subject.rfc4514_string(),
                     "expiry": expiry.isoformat(),
@@ -332,18 +332,27 @@ def zgrab_tls(host):
 def openssl_tls(host):
     try:
         cmd = [
-            "openssl",
-            "s_client",
-            "-connect", f"{host}:443",
-            "-servername", host,
-            "-showcerts"
+            "docker",
+            "run",
+            "--rm",
+            "alpine:latest",
+            "sh",
+            "-c",
+            (
+                f"apk add --no-cache openssl >/dev/null 2>&1 && "
+                f"openssl s_client "
+                f"-connect {host}:443 "
+                f"-servername {host} "
+                f"-showcerts "
+                f"-tls1_3"
+            )
         ]
 
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=25
+            timeout=40
         )
 
         output = (result.stdout or "") + "\n" + (result.stderr or "")
@@ -376,22 +385,19 @@ def openssl_tls(host):
                 cipher = line.split(":", 1)[1].strip()
 
             elif line.startswith("Cipher is"):
-                try:
-                    cipher = line.split("Cipher is", 1)[1].strip()
-                except Exception:
-                    pass
+                cipher = line.split("Cipher is", 1)[1].strip()
 
             elif "Server Temp Key:" in line:
-                try:
-                    key_exchange = line.split(":", 1)[1].strip()
-                except Exception:
-                    pass
+                key_exchange = line.split(":", 1)[1].strip()
+
+            elif "Negotiated TLS1.3 group:" in line:
+                key_exchange = line.split(":", 1)[1].strip()
+
+            elif "TLS1.3 group:" in line:
+                key_exchange = line.split(":", 1)[1].strip()
 
             elif "Peer signature type:" in line:
-                try:
-                    signature_algorithm = line.split(":", 1)[1].strip()
-                except Exception:
-                    pass
+                signature_algorithm = line.split(":", 1)[1].strip()
 
             elif "sigalg:" in line.lower():
                 try:
@@ -399,29 +405,18 @@ def openssl_tls(host):
                 except Exception:
                     pass
 
+            elif "Server public key is" in line and "bit" in line:
+                digits = "".join(ch for ch in line if ch.isdigit())
+                if digits:
+                    key_size = int(digits)
+
             elif "PKEY:" in line and "bit" in line:
-                try:
-                    parts = line.split(",")
-                    for part in parts:
-                        if "bit" in part.lower():
-                            digits = "".join(ch for ch in part if ch.isdigit())
-                            if digits:
-                                key_size = int(digits)
-                                break
-                except Exception:
-                    pass
+                digits = "".join(ch for ch in line if ch.isdigit())
+                if digits:
+                    key_size = int(digits)
 
             elif "NotAfter:" in line:
-                try:
-                    expiry = line.split("NotAfter:", 1)[1].strip()
-                except Exception:
-                    pass
-
-            elif "TLS1.3 group:" in line or "Negotiated TLS1.3 group:" in line:
-                try:
-                    key_exchange = line.split(":", 1)[1].strip()
-                except Exception:
-                    pass
+                expiry = line.split("NotAfter:", 1)[1].strip()
 
         return {
             "tls_version": tls_version,
@@ -441,7 +436,6 @@ def openssl_tls(host):
         logger.warning(f"OpenSSL TLS failed → {host} | {e}")
 
     return None
-
 
 # -----------------------------------
 # Nmap TLS Enumeration

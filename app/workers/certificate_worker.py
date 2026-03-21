@@ -1,8 +1,8 @@
 import json
 import logging
 import time
-import asyncio
 from datetime import datetime
+
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
 
@@ -12,16 +12,67 @@ from app.services.scan_service import store_certificate_result
 from app.models.asset_registry import AssetRegistry
 from app.models.certificate import Certificate
 from app.workers.kafka_producer import send_event
+from app.utils.log_streamer import setup_logger
 
-# 🔥 ADD THIS (LOG TO KAFKA)
+
+# -------------------- LOG TO KAFKA --------------------
 def send_log(message: str, scan_id: str = None):
     send_event("scan-logs", {
         "type": "log",
         "message": message,
         "scan_id": scan_id
     })
-    
-from app.utils.log_streamer import setup_logger
+
+
+# -------------------- HELPERS --------------------
+def normalize_host(host: str) -> str:
+    if not host:
+        return ""
+
+    return (
+        str(host).strip().lower()
+        .replace("https://", "")
+        .replace("http://", "")
+        .split(":")[0]
+        .strip("/")
+    )
+
+
+def parse_expiry(expiry_value):
+    if not expiry_value:
+        return None
+
+    if isinstance(expiry_value, datetime):
+        return expiry_value
+
+    if isinstance(expiry_value, str):
+        try:
+            return datetime.fromisoformat(expiry_value)
+        except Exception:
+            pass
+
+        try:
+            return datetime.strptime(expiry_value, "%b %d %H:%M:%S %Y %Z")
+        except Exception:
+            pass
+
+    return None
+
+
+def get_asset_with_retry(db: Session, host: str, retries: int = 2, delay: int = 2):
+    for attempt in range(retries + 1):
+        asset = db.query(AssetRegistry).filter(
+            AssetRegistry.asset_identifier == host
+        ).first()
+
+        if asset:
+            return asset
+
+        if attempt < retries:
+            logger.warning(f"Asset not found → {host}, retrying...")
+            time.sleep(delay)
+
+    return None
 
 
 # -------------------- ENABLE GLOBAL LOG STREAM --------------------
@@ -54,30 +105,19 @@ print("Waiting for Kafka messages...")
 
 
 # -------------------- MAIN LOOP --------------------
-
 for message in consumer:
-
     print("KAFKA MESSAGE RECEIVED:", message.value)
-
     event = message.value
-    
+
     scan_id = event.get("scan_id")
-    
+
     if not scan_id:
-        logger.warning(f"No scan_id for certificate → {host}")
+        logger.warning("No scan_id for certificate event")
 
     if event.get("event_type") != "tls_scan_result":
         continue
 
-    host = event.get("asset", "").lower().strip()
-
-    # clean URL
-    host = (
-        host.replace("https://", "")
-            .replace("http://", "")
-            .split(":")[0]
-            .strip("/")
-    )
+    host = normalize_host(event.get("asset"))
 
     if not host:
         continue
@@ -85,49 +125,26 @@ for message in consumer:
     db: Session = SessionLocal()
 
     try:
-
         logger.info(f"🔐 Processing certificate → {host}")
         send_log(f"🔐 Processing certificate → {host}", scan_id)
 
         # ------------------------------------------------
         # 1️⃣ GET ASSET
         # ------------------------------------------------
-
-        asset = db.query(AssetRegistry).filter(
-            AssetRegistry.asset_identifier == host
-        ).first()
+        asset = get_asset_with_retry(db, host)
 
         if not asset:
-
-            logger.warning(f"Asset not found → {host}, retrying...")
-            send_log(f"Retrying asset lookup: {host}", scan_id)
-
-            time.sleep(2)
-
-            asset = db.query(AssetRegistry).filter(
-                AssetRegistry.asset_identifier == host
-            ).first()
-
-            if not asset:
-                logger.warning(f"Asset still missing → {host}")
-                send_log(f"Asset not found: {host}", scan_id)
-                continue
+            logger.warning(f"Asset still missing → {host}")
+            send_log(f"⚠ Asset not found → {host}", scan_id)
+            continue
 
         # ------------------------------------------------
         # 2️⃣ GET CERTIFICATE
         # ------------------------------------------------
-
         cert = None
 
         if event.get("certificate_subject"):
-
-            expiry = event.get("expiry")
-
-            if isinstance(expiry, str):
-                try:
-                    expiry = datetime.strptime(expiry, "%b %d %H:%M:%S %Y %Z")
-                except:
-                    expiry = None
+            expiry = parse_expiry(event.get("expiry"))
 
             cert = {
                 "issuer": event.get("certificate_issuer"),
@@ -139,14 +156,15 @@ for message in consumer:
 
             logger.info("Certificate obtained from TLS event")
             send_log(f"🔐 TLS certificate found → {host}", scan_id)
-        else:
 
+        else:
             logger.info("TLS event had no certificate → fallback scan")
             send_log(f"🔍 Fallback certificate scan → {host}", scan_id)
 
             try:
                 cert = get_certificate_info(host)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Fallback certificate scan failed → {host} | {e}")
                 cert = None
 
             if not cert:
@@ -154,13 +172,15 @@ for message in consumer:
                 send_log(f"❌ No certificate found → {host}", scan_id)
                 continue
 
+            cert["expiry"] = parse_expiry(cert.get("expiry"))
+
         # ------------------------------------------------
         # 3️⃣ CHECK DUPLICATE
         # ------------------------------------------------
-
         cert_exists = db.query(Certificate).filter(
             Certificate.asset_id == asset.id,
-            Certificate.signature_algorithm == cert.get("signature_algorithm")
+            Certificate.signature_algorithm == cert.get("signature_algorithm"),
+            Certificate.subject == cert.get("subject")
         ).first()
 
         if cert_exists:
@@ -171,7 +191,6 @@ for message in consumer:
         # ------------------------------------------------
         # 4️⃣ STORE CERTIFICATE
         # ------------------------------------------------
-
         store_certificate_result(
             db,
             asset_hostname=host,
@@ -185,9 +204,8 @@ for message in consumer:
         # ------------------------------------------------
         # 5️⃣ SEND EVENT
         # ------------------------------------------------
-
         cert_event = {
-            "scan_id": event.get("scan_id"),
+            "scan_id": scan_id,
             "event_type": "certificate_discovered",
             "asset": host,
             "issuer": cert.get("issuer"),
@@ -203,7 +221,6 @@ for message in consumer:
         send_log(f"📜 Certificate stored → {host}", scan_id)
 
     except Exception as e:
-
         db.rollback()
 
         logger.error(f"❌ Certificate worker failed → {host}")
@@ -212,5 +229,4 @@ for message in consumer:
         send_log(f"❌ Certificate scan failed → {host}", scan_id)
 
     finally:
-
         db.close()

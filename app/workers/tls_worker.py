@@ -10,11 +10,12 @@ from app.scanners.tls_scanner import scan_tls
 from app.db.postgres import SessionLocal
 from app.models.tls import TLSScanResult
 from app.models.asset_registry import AssetRegistry
-
 from app.services.graph_service import GraphService
 from app.utils.log_streamer import setup_logger
-
 from app.workers.kafka_producer import send_event
+
+
+# -------------------- HELPERS --------------------
 
 def send_log(message: str, scan_id: str = None):
     send_event("scan-logs", {
@@ -24,8 +25,32 @@ def send_log(message: str, scan_id: str = None):
     })
 
 
+def detect_forward_secrecy(tls_version: str, cipher: str, key_exchange: str) -> bool:
+    tls_version = (tls_version or "").upper().strip()
+    cipher = (cipher or "").upper().strip()
+    key_exchange = (key_exchange or "").upper().strip()
+
+    # TLS 1.3 uses ephemeral key exchange by design
+    if tls_version in ["TLSV1.3", "TLS1.3"]:
+        return True
+
+    # TLS 1.2 / older ciphers with DHE / ECDHE
+    if "DHE" in cipher:
+        return True
+
+    # Explicit negotiated group / exchange hints
+    if any(k in key_exchange for k in [
+        "DHE", "ECDHE", "ECDH", "X25519", "X448", "SECP", "P-256", "P-384", "P-521",
+        "KYBER", "MLKEM"
+    ]):
+        return True
+
+    return False
+
+
 # -------------------- LOGGING --------------------
-setup_logger()  # 🔥 stream logs to UI
+
+setup_logger()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +63,7 @@ logger = logging.getLogger("TLSWorker")
 
 
 # -------------------- INIT --------------------
+
 graph = GraphService()
 
 consumer = KafkaConsumer(
@@ -57,33 +83,33 @@ producer = KafkaProducer(
 logger.info("🚀 TLS Worker Started")
 print("Waiting for Kafka messages...")
 
+
 # -------------------- MAIN LOOP --------------------
 
 for message in consumer:
-
     print("KAFKA MESSAGE RECEIVED:", message.value)
     event = message.value
 
-    try:
+    scan_id = event.get("scan_id")
+    asset = event.get("asset")
 
+    try:
         if event.get("event_type") != "port_open":
             continue
 
         if event.get("port") != 443:
             continue
 
-        asset = event.get("asset")
-        scan_id = event.get("scan_id")
-        
+        if not asset:
+            logger.warning("TLS event received without asset")
+            continue
+
         if not scan_id:
             logger.warning(f"⚠ Missing scan_id for TLS → {asset}")
 
-        if not asset:
-            continue
-
         logger.info(f"🔐 TLS Scan started → {asset}")
         send_log(f"🔐 TLS scan started → {asset}", scan_id)
-        
+
         # ---------------- SCAN TLS ----------------
         try:
             result = scan_tls(asset)
@@ -94,7 +120,6 @@ for message in consumer:
 
         # ---------------- FALLBACK ----------------
         if not result:
-
             logger.warning(f"TLS handshake failed → {asset}")
             send_log(f"❌ TLS handshake failed → {asset}", scan_id)
 
@@ -114,20 +139,28 @@ for message in consumer:
                 "certificate_issuer": None,
                 "certificate_subject": None,
                 "signature_algorithm": None,
-                "key_size": None
+                "key_size": None,
+                "expiry": None
             })
             producer.flush()
-            
             continue
+
+        # Normalize extracted values
+        tls_version = result.get("tls_version")
+        cipher_suite = result.get("cipher_suite")
+        key_exchange = result.get("key_exchange")
+        forward_secrecy = detect_forward_secrecy(
+            tls_version=tls_version,
+            cipher=cipher_suite,
+            key_exchange=key_exchange
+        )
 
         # ---------------- DB OPERATIONS ----------------
         db: Session = SessionLocal()
 
         try:
-
             asset_record = None
 
-            # retry fetch
             for _ in range(3):
                 asset_record = db.query(AssetRegistry).filter(
                     AssetRegistry.asset_identifier == asset
@@ -141,6 +174,7 @@ for message in consumer:
 
             if not asset_record:
                 logger.warning(f"Asset still missing → {asset}")
+                send_log(f"⚠ Asset not found for TLS result → {asset}", scan_id)
                 continue
 
             existing = db.query(TLSScanResult).filter(
@@ -148,24 +182,20 @@ for message in consumer:
             ).first()
 
             if existing:
-
-                existing.tls_version = result.get("tls_version")
-                existing.cipher_suite = result.get("cipher_suite")
-                existing.key_exchange = result.get("key_exchange")
+                existing.tls_version = tls_version
+                existing.cipher_suite = cipher_suite
+                existing.key_exchange = key_exchange
+                existing.forward_secrecy = forward_secrecy
                 existing.scan_time = datetime.now(UTC)
 
                 logger.info(f"TLS updated → {asset}")
 
             else:
-
-                cipher = result.get("cipher_suite")
-                forward_secrecy = "DHE" in cipher if cipher else False
-
                 tls_result = TLSScanResult(
                     asset_id=asset_record.id,
-                    tls_version=result.get("tls_version"),
-                    cipher_suite=result.get("cipher_suite"),
-                    key_exchange=result.get("key_exchange"),
+                    tls_version=tls_version,
+                    cipher_suite=cipher_suite,
+                    key_exchange=key_exchange,
                     forward_secrecy=forward_secrecy,
                     scan_time=datetime.now(UTC)
                 )
@@ -177,22 +207,17 @@ for message in consumer:
 
             # ---------------- GRAPH UPDATE ----------------
             try:
-                graph.add_tls(
-                    asset,
-                    result.get("tls_version"),
-                    result.get("cipher_suite")
-                )
+                graph.add_tls(asset, tls_version, cipher_suite)
                 logger.info(f"Graph updated → TLS for {asset}")
-
             except Exception as e:
                 logger.error("Neo4j TLS update failed")
                 logger.error(e)
 
         except Exception as e:
-
             db.rollback()
-            logger.error("Failed to store TLS result")
+            logger.error(f"Failed to store TLS result → {asset}")
             logger.error(e)
+            send_log(f"❌ Failed to store TLS result → {asset}", scan_id)
 
         finally:
             db.close()
@@ -202,24 +227,22 @@ for message in consumer:
             "scan_id": scan_id,
             "event_type": "tls_scan_result",
             "asset": asset,
-            "tls_version": result.get("tls_version"),
-            "cipher_suite": result.get("cipher_suite"),
-            "key_exchange": result.get("key_exchange"),
+            "tls_version": tls_version,
+            "cipher_suite": cipher_suite,
+            "key_exchange": key_exchange,
             "certificate_issuer": result.get("certificate_issuer"),
             "certificate_subject": result.get("certificate_subject"),
             "signature_algorithm": result.get("signature_algorithm"),
             "key_size": result.get("key_size"),
-            "expiry": result.get("expiry")
+            "expiry": result.get("expiry"),
+            "forward_secrecy": forward_secrecy
         })
-
         producer.flush()
 
         logger.info(f"TLS event sent → {asset}")
         send_log(f"🔐 TLS scan completed → {asset}", scan_id)
 
     except Exception as e:
-
         logger.error("❌ TLS worker crashed")
         logger.error(e)
-
-        send_log(f"❌ TLS scan failed → {event.get('asset')}", scan_id)
+        send_log(f"❌ TLS scan failed → {asset}", scan_id)
