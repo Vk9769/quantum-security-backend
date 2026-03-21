@@ -7,24 +7,8 @@ from app.db.postgres import get_db
 router = APIRouter()
 
 
-def get_tls_color(version: str) -> str:
-    version = (version or "").strip()
-
-    if version == "TLS 1.3":
-        return "bg-success"
-    elif version == "TLS 1.2":
-        return "bg-warning"
-    elif version == "TLS 1.1":
-        return "bg-destructive/70"
-    else:
-        return "bg-destructive"
-
-
 @router.get("/tls-analytics")
 def get_tls_analytics(db: Session = Depends(get_db)):
-    # -----------------------------
-    # Query TLS Version Distribution
-    # -----------------------------
     tls_query = text("""
         SELECT 
             tls_version,
@@ -35,9 +19,6 @@ def get_tls_analytics(db: Session = Depends(get_db)):
         ORDER BY total DESC
     """)
 
-    # -----------------------------
-    # Query Cipher Distribution
-    # -----------------------------
     cipher_query = text("""
         SELECT 
             cipher_suite,
@@ -51,34 +32,24 @@ def get_tls_analytics(db: Session = Depends(get_db)):
     tls_rows = db.execute(tls_query).fetchall()
     cipher_rows = db.execute(cipher_query).fetchall()
 
-    # -----------------------------
-    # Total counts for percentage
-    # -----------------------------
     total_tls = sum(row.total for row in tls_rows) if tls_rows else 0
     total_cipher = sum(row.total for row in cipher_rows) if cipher_rows else 0
 
-    # -----------------------------
-    # Build TLS Data
-    # -----------------------------
-    tls_data = []
-    for row in tls_rows:
-        pct = round((row.total * 100.0 / total_tls), 2) if total_tls > 0 else 0
-        tls_data.append({
+    tls_data = [
+        {
             "version": row.tls_version,
-            "pct": pct,
-            "color": get_tls_color(row.tls_version)
-        })
+            "pct": round((row.total * 100.0 / total_tls), 2) if total_tls > 0 else 0
+        }
+        for row in tls_rows
+    ]
 
-    # -----------------------------
-    # Build Cipher Data
-    # -----------------------------
-    cipher_data = []
-    for row in cipher_rows:
-        pct = round((row.total * 100.0 / total_cipher), 2) if total_cipher > 0 else 0
-        cipher_data.append({
+    cipher_data = [
+        {
             "cipher": row.cipher_suite,
-            "pct": pct
-        })
+            "pct": round((row.total * 100.0 / total_cipher), 2) if total_cipher > 0 else 0
+        }
+        for row in cipher_rows
+    ]
 
     return {
         "tlsData": tls_data,
