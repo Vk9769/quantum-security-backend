@@ -1,10 +1,12 @@
 from typing import Optional
-from fastapi import APIRouter, Depends, Query
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.postgres import get_db
-from app.schemas.pqc_schema import PQCDashboardResponse
-from app.services.pqc_service import build_pqc_dashboard
+from app.schemas.pqc_schema import PQCDashboardResponse, PQCAppDetails
+from app.services.pqc_service import build_pqc_dashboard, get_pqc_asset_details
 
 router = APIRouter()
 
@@ -19,3 +21,16 @@ def get_pqc_dashboard(
     or only for a searched domain.
     """
     return build_pqc_dashboard(db, domain)
+
+
+@router.get("/pqc/asset-details/{asset_id}", response_model=PQCAppDetails)
+def get_asset_details(
+    asset_id: UUID,
+    db: Session = Depends(get_db)
+):
+    details = get_pqc_asset_details(db, asset_id)
+
+    if not details:
+        raise HTTPException(status_code=404, detail="Asset details not found")
+
+    return details

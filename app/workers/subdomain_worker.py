@@ -7,11 +7,10 @@ from app.services.asset_service import store_subdomain
 from app.scanners.subdomain_scanner import discover_subdomains
 from app.workers.kafka_producer import send_asset_discovered
 from app.services.graph_service import GraphService
-
-# ⚠️ FIX: correct import path if needed
 from app.models.topology import TopologyNode, TopologyEdge
 from app.utils.log_streamer import setup_logger
 from app.workers.kafka_producer import send_event
+
 
 def send_log(message: str, scan_id: str = None):
     send_event("scan-logs", {
@@ -19,6 +18,19 @@ def send_log(message: str, scan_id: str = None):
         "message": message,
         "scan_id": scan_id
     })
+
+
+def normalize_host(value: str) -> str:
+    if not value:
+        return ""
+
+    return (
+        str(value).strip().lower()
+        .replace("https://", "")
+        .replace("http://", "")
+        .split(":")[0]
+        .strip("/")
+    )
 
 
 # -------------------- LOGGER --------------------
@@ -44,13 +56,9 @@ logger.info("🚀 Subdomain Worker Started")
 print("SUBDOMAIN WORKER RUNNING")
 print("Waiting for Kafka messages...")
 
+
 # -------------------- HELPERS --------------------
-
 def create_topology(db, domain, subdomain):
-    """
-    Create nodes + edge in topology tables
-    """
-
     # DOMAIN NODE
     domain_node = db.query(TopologyNode).filter(
         TopologyNode.value == domain
@@ -77,7 +85,7 @@ def create_topology(db, domain, subdomain):
         db.add(sub_node)
         db.flush()
 
-    # EDGE (avoid duplicate)
+    # EDGE
     existing_edge = db.query(TopologyEdge).filter(
         TopologyEdge.source_node == domain_node.id,
         TopologyEdge.target_node == sub_node.id
@@ -93,11 +101,12 @@ def create_topology(db, domain, subdomain):
 
     return domain_node, sub_node
 
+
 # -------------------- MAIN LOOP --------------------
-
 for message in consumer:
-
     db = SessionLocal()
+    target = None
+    scan_id = None
 
     try:
         event = message.value
@@ -107,16 +116,19 @@ for message in consumer:
             continue
 
         scan_id = event.get("scan_id")
-        
+
         if not scan_id:
             logger.warning("No scan_id in incoming event")
-    
-        target = event.get("domain")
+
+        organization_id = event.get("organization_id") or "10024715-cd08-49a4-b316-4f394c14d267"
+        target = normalize_host(event.get("domain"))
 
         if not target:
+            logger.warning("No valid target domain in scan_started event")
             continue
 
         logger.info(f"🔥 Starting asset discovery → {target}")
+
         # ---------------- GRAPH ROOT ----------------
         try:
             graph.create_domain(target)
@@ -134,13 +146,16 @@ for message in consumer:
         send_log(f"📡 Discovered {len(assets)} assets", scan_id)
 
         if not assets:
-            assets = [target]
+            assets = [{"subdomain": target, "ip_address": None}]
 
         # ---------------- PROCESS EACH ASSET ----------------
         for item in assets:
-
-            asset = item.get("subdomain", "").lower().strip()
-            ip_address = item.get("ip_address")
+            if isinstance(item, dict):
+                asset = normalize_host(item.get("subdomain", ""))
+                ip_address = item.get("ip_address")
+            else:
+                asset = normalize_host(str(item))
+                ip_address = None
 
             if not asset:
                 continue
@@ -152,17 +167,21 @@ for message in consumer:
                 # STORE IN DB
                 sub_record = store_subdomain(
                     db,
-                    event.get("organization_id") or "10024715-cd08-49a4-b316-4f394c14d267",
+                    organization_id,
                     target,
                     asset,
                     ip_address
                 )
 
                 if not sub_record:
+                    logger.warning(f"Skipping asset because DB store failed → {asset}")
                     continue
 
                 # GRAPH
-                graph.create_asset(target, asset)
+                try:
+                    graph.create_asset(target, asset)
+                except Exception as e:
+                    logger.warning(f"Graph asset creation failed for {asset}: {e}")
 
                 # TOPOLOGY
                 create_topology(db, target, asset)
@@ -171,7 +190,8 @@ for message in consumer:
                 send_asset_discovered(
                     asset,
                     target,
-                    scan_id
+                    scan_id,
+                    organization_id
                 )
 
                 # LIVE UI
@@ -189,13 +209,10 @@ for message in consumer:
         send_log(f"✅ Subdomain scan completed → {target}", scan_id)
 
     except Exception as e:
-
         db.rollback()
-
         logger.error("❌ Subdomain worker crashed")
         logger.error(e)
-
-        send_log(f"❌ Subdomain scan failed → {target}", scan_id)
+        send_log(f"❌ Subdomain scan failed → {target or 'unknown'}", scan_id)
 
     finally:
         db.close()

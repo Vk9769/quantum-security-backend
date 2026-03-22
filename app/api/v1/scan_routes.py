@@ -2,14 +2,17 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from datetime import datetime
 import asyncio
+import logging
 
 from app.db.postgres import SessionLocal
 from app.models.asset_registry import AssetRegistry
 from app.models.scan_jobs import ScanJob
 from app.workers.kafka_producer import send_event
 from app.utils.websocket_manager import manager
+from app.workers.worker_manager import worker_manager
 
 router = APIRouter()
+logger = logging.getLogger("ScanRoute")
 
 
 # ============================================
@@ -26,7 +29,6 @@ class ScanRequest(BaseModel):
 
 @router.post("/start")
 def start_scan(payload: ScanRequest):
-
     domain = payload.domain.strip().lower()
 
     if not domain:
@@ -35,11 +37,14 @@ def start_scan(payload: ScanRequest):
     db = SessionLocal()
 
     try:
+        # ============================================
+        # 0. ENSURE WORKERS ARE RUNNING
+        # ============================================
+        worker_manager.ensure_workers_running()
 
         # ============================================
         # 1. CREATE SCAN JOB
         # ============================================
-
         scan_job = ScanJob(
             organization_id="10024715-cd08-49a4-b316-4f394c14d267",  # TODO: dynamic later
             scan_type="full",
@@ -57,7 +62,6 @@ def start_scan(payload: ScanRequest):
         # ============================================
         # 2. CHECK IF DOMAIN ALREADY EXISTS
         # ============================================
-
         existing = db.query(AssetRegistry).filter(
             AssetRegistry.asset_identifier == domain
         ).first()
@@ -79,7 +83,6 @@ def start_scan(payload: ScanRequest):
         # ============================================
         # 3. SEND EVENT TO KAFKA
         # ============================================
-
         event = {
             "event_type": "scan_started",
             "domain": domain,
@@ -92,11 +95,6 @@ def start_scan(payload: ScanRequest):
         # ============================================
         # 4. SEND REAL-TIME WS LOG
         # ============================================
-        
-        import logging
-
-        logger = logging.getLogger("ScanRoute")
-
         logger.info(f"🔍 Scan started for {domain}")
 
         return {
@@ -108,7 +106,7 @@ def start_scan(payload: ScanRequest):
 
     except Exception as e:
         db.rollback()
-        print("SCAN ERROR:", e)
+        logger.exception("SCAN ERROR")
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
@@ -121,13 +119,11 @@ def start_scan(payload: ScanRequest):
 
 @router.get("/status/{domain}")
 def scan_status(domain: str):
-
     db = SessionLocal()
 
     try:
-
-        scan = db.query(ScanJob)\
-            .order_by(ScanJob.started_at.desc())\
+        scan = db.query(ScanJob) \
+            .order_by(ScanJob.started_at.desc()) \
             .first()
 
         if not scan:
@@ -153,12 +149,11 @@ def scan_status(domain: str):
 
 @router.websocket("/ws")
 async def scan_websocket(websocket: WebSocket):
-
     await manager.connect(websocket)
 
     try:
         while True:
-            await asyncio.sleep(1)  # keep alive
+            await asyncio.sleep(1)
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)

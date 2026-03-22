@@ -32,6 +32,7 @@ class PQCAssetItem(BaseModel):
 
 
 class PQCAppDetails(BaseModel):
+    asset_id: Optional[UUID] = None
     name: str
     owner: Optional[str] = None
     exposure: Optional[str] = None
@@ -39,6 +40,16 @@ class PQCAppDetails(BaseModel):
     score: Optional[int] = None
     risk_label: Optional[str] = None
     status: Optional[str] = None
+    ip: Optional[str] = None
+    pqc_support: Optional[bool] = None
+    key_exchange: Optional[str] = None
+    quantum_risk: Optional[str] = None
+    criticality: Optional[str] = None
+    environment: Optional[str] = None
+    cloud_provider: Optional[str] = None
+    region: Optional[str] = None
+    algorithm: Optional[str] = None
+    recommended_upgrade: Optional[str] = None
 
 
 class PQCDashboardResponse(BaseModel):
