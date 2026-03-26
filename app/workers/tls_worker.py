@@ -75,10 +75,6 @@ consumer = KafkaConsumer(
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )
 
-producer = KafkaProducer(
-    bootstrap_servers="localhost:9092",
-    value_serializer=lambda v: json.dumps(v).encode("utf-8")
-)
 
 logger.info("🚀 TLS Worker Started")
 print("Waiting for Kafka messages...")
@@ -106,9 +102,13 @@ for message in consumer:
 
         if not scan_id:
             logger.warning(f"⚠ Missing scan_id for TLS → {asset}")
-
+            
         logger.info(f"🔐 TLS Scan started → {asset}")
         send_log(f"🔐 TLS scan started → {asset}", scan_id)
+
+        # ✅ INIT DB EARLY
+        db: Session = SessionLocal()
+
 
         # ---------------- SCAN TLS ----------------
         try:
@@ -129,7 +129,7 @@ for message in consumer:
                 logger.error("Neo4j TLS update failed")
                 logger.error(e)
 
-            producer.send("tls-events", {
+            send_event("tls-events", {
                 "scan_id": scan_id,
                 "event_type": "tls_scan_result",
                 "asset": asset,
@@ -141,8 +141,7 @@ for message in consumer:
                 "signature_algorithm": None,
                 "key_size": None,
                 "expiry": None
-            })
-            producer.flush()
+            }, key=asset)
             continue
 
         # Normalize extracted values
@@ -154,9 +153,6 @@ for message in consumer:
             cipher=cipher_suite,
             key_exchange=key_exchange
         )
-
-        # ---------------- DB OPERATIONS ----------------
-        db: Session = SessionLocal()
 
         try:
             asset_record = None
@@ -182,15 +178,17 @@ for message in consumer:
             ).first()
 
             if existing:
+                # ✅ UPDATE existing record
                 existing.tls_version = tls_version
                 existing.cipher_suite = cipher_suite
                 existing.key_exchange = key_exchange
                 existing.forward_secrecy = forward_secrecy
                 existing.scan_time = datetime.now(UTC)
 
-                logger.info(f"TLS updated → {asset}")
+                logger.info(f"🔄 TLS updated → {asset}")
 
             else:
+                # ✅ INSERT new record
                 tls_result = TLSScanResult(
                     asset_id=asset_record.id,
                     tls_version=tls_version,
@@ -201,7 +199,7 @@ for message in consumer:
                 )
 
                 db.add(tls_result)
-                logger.info(f"TLS stored → {asset}")
+                logger.info(f"💾 TLS stored → {asset}")
 
             db.commit()
 
@@ -223,7 +221,7 @@ for message in consumer:
             db.close()
 
         # ---------------- SEND NEXT EVENT ----------------
-        producer.send("tls-events", {
+        send_event("tls-events", {
             "scan_id": scan_id,
             "event_type": "tls_scan_result",
             "asset": asset,
@@ -236,8 +234,7 @@ for message in consumer:
             "key_size": result.get("key_size"),
             "expiry": result.get("expiry"),
             "forward_secrecy": forward_secrecy
-        })
-        producer.flush()
+        }, key=asset)
 
         logger.info(f"TLS event sent → {asset}")
         send_log(f"🔐 TLS scan completed → {asset}", scan_id)

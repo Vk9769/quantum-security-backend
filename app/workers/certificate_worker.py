@@ -177,16 +177,7 @@ for message in consumer:
         # ------------------------------------------------
         # 3️⃣ CHECK DUPLICATE
         # ------------------------------------------------
-        cert_exists = db.query(Certificate).filter(
-            Certificate.asset_id == asset.id,
-            Certificate.signature_algorithm == cert.get("signature_algorithm"),
-            Certificate.subject == cert.get("subject")
-        ).first()
 
-        if cert_exists:
-            logger.info(f"Certificate already exists → {host}")
-            send_log(f"⚠ Certificate already exists → {host}", scan_id)
-            continue
 
         # ------------------------------------------------
         # 4️⃣ STORE CERTIFICATE

@@ -58,11 +58,12 @@ for message in consumer:
     scan_id = event.get("scan_id")
     
     if not scan_id:
-        logger.warning(f"No scan_id for {asset}")
+      logger.warning("No scan_id in CBOM event")
 
-    if event_type not in ["certificate_discovered", "tls_scan_result"]:
+    # ✅ ONLY PROCESS ON CERTIFICATE (FINAL STAGE)
+    if event_type != "certificate_discovered":
         continue
-
+    
     asset = event.get("asset")
 
     if not asset:
@@ -165,7 +166,8 @@ for message in consumer:
                 tls_version=cbom_data["tls_version"],
                 cipher_suite=cbom_data["cipher_suite"],
                 key_exchange=cbom_data["key_exchange"],
-                certificate_id=cert.id if cert else None
+                certificate_id=cert.id if cert else None,
+                scan_id=scan_id   # only if your service supports it
             )
 
             logger.info(f"💾 CBOM stored → {asset}")

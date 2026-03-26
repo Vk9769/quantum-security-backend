@@ -76,6 +76,22 @@ def ensure_scan_job_exists(db, scan_id):
     
 def store_event_stream(db: Session, event_type: str, payload: dict):
 
+    event_id = payload.get("event_id")
+
+    if not event_id:
+        logger.warning("⚠ Missing event_id, skipping event")
+        return False
+
+    # ✅ DEDUP CHECK
+    existing = db.query(EventStream).filter(
+        EventStream.event_type == event_type,
+        EventStream.payload.contains({"event_id": event_id})
+    ).first()
+
+    if existing:
+        logger.info(f"⚠ Duplicate event skipped → {event_id}")
+        return False
+
     event = EventStream(
         event_type=event_type,
         payload=payload,
@@ -84,6 +100,8 @@ def store_event_stream(db: Session, event_type: str, payload: dict):
 
     db.add(event)
     db.commit()
+
+    return True
 
 
 def store_scan_event(db: Session, scan_id, event_type: str, payload: dict):
@@ -132,8 +150,10 @@ for message in consumer:
         # Store every event in event_stream
         # ------------------------------------
         scan_id = event.get("scan_id")
-        store_event_stream(db, event_type, event)
+        is_new = store_event_stream(db, event_type, event)
 
+        if not is_new:
+            continue  # 🔥 STOP DUPLICATE PROCESSING
         # ------------------------------------
         # Scan Started
         # ------------------------------------

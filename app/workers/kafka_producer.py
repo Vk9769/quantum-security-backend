@@ -32,6 +32,19 @@ logger = logging.getLogger("KafkaProducer")
 # JSON SERIALIZER
 # ---------------------------------------------------
 
+
+def generate_event_id(payload: dict) -> str:
+    event_type = payload.get("event_type", "unknown")
+    asset = payload.get("asset") or payload.get("domain") or "unknown"
+    scan_id = payload.get("scan_id", "unknown")
+
+    base = f"{event_type}:{asset}:{scan_id}"
+
+    if payload.get("port"):
+        base += f":{payload.get('port')}"
+
+    return base
+
 def json_serializer(value):
     try:
         return json.dumps(value).encode("utf-8")
@@ -123,8 +136,10 @@ def send_event(topic: str, data: dict, key: str = None):
 
         if payload.get("domain"):
             payload["domain"] = normalize_asset(payload["domain"])
+            
+        payload["event_id"] = generate_event_id(payload)
 
-        kafka_key = key
+        kafka_key = key or payload.get("asset") or payload.get("domain")
         if kafka_key:
             kafka_key = normalize_asset(kafka_key)
 

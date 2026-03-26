@@ -4,7 +4,7 @@ import time
 
 from kafka import KafkaConsumer, KafkaProducer
 from sqlalchemy.orm import Session
-
+from app.models.scan import PortScanResult
 from app.scanners.port_scanner import scan_ports
 from app.db.postgres import SessionLocal
 from app.models.asset_registry import AssetRegistry
@@ -84,6 +84,7 @@ def ensure_asset_exists(
 
 # -------------------- INIT --------------------
 graph = GraphService()
+
 scanned_assets = set()
 
 consumer = KafkaConsumer(
@@ -95,10 +96,6 @@ consumer = KafkaConsumer(
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )
 
-producer = KafkaProducer(
-    bootstrap_servers="localhost:9092",
-    value_serializer=lambda v: json.dumps(v).encode("utf-8")
-)
 
 logger.info("🚀 Port Scan Worker Started")
 print("Waiting for Kafka messages...")
@@ -120,13 +117,15 @@ for message in consumer:
     if not asset:
         logger.warning("Skipping asset_discovered event with empty asset")
         continue
+    
+    key = f"{asset}:{scan_id}"
 
-    # prevent duplicate scanning
-    if asset in scanned_assets:
-        logger.info(f"Skipping duplicate asset scan → {asset}")
+    if key in scanned_assets:
+        logger.info(f"Skipping duplicate asset scan → {key}")
         continue
 
-    scanned_assets.add(asset)
+    scanned_assets.add(key)
+
 
     logger.info(f"🔍 Preparing port scan → {asset}")
     send_log(f"🔍 Preparing port scan → {asset}", scan_id)
@@ -161,6 +160,7 @@ for message in consumer:
         # small wait for consistency
         time.sleep(1)
 
+
         # ---------------- PORT SCAN ----------------
         logger.info(f"🔍 Scanning ports → {asset}")
         send_log(f"🔍 Scanning ports → {asset}", scan_id)
@@ -179,16 +179,16 @@ for message in consumer:
 
         for port in ports:
             try:
-                # ---------------- STORE IN POSTGRES ----------------
+                # ✅ ONLY SERVICE HANDLES DB + DEDUP
                 store_port_scan_result(db, asset, port)
 
-                # ---------------- GRAPH (NEO4J) ----------------
+                # ---------------- GRAPH ----------------
                 try:
                     graph.add_port(asset, port)
                 except Exception as e:
                     logger.error(f"Graph update failed for {asset}:{port} → {e}")
 
-                # ---------------- KAFKA EVENT ----------------
+                # ---------------- KAFKA ----------------
                 port_event = {
                     "scan_id": scan_id,
                     "organization_id": organization_id,
@@ -197,7 +197,7 @@ for message in consumer:
                     "port": port
                 }
 
-                producer.send("port-scan-events", port_event)
+                send_event("port-scan-events", port_event, key=asset)
 
                 send_log(f"🔓 Open port → {asset}:{port}", scan_id)
                 logger.info(f"✅ Port event sent → {asset}:{port}")
@@ -205,7 +205,6 @@ for message in consumer:
             except Exception as e:
                 logger.error(f"Error processing port {port} for {asset}: {e}")
 
-        producer.flush()
 
         logger.info(f"✅ Port scan completed → {asset}")
         send_log(f"✅ Port scan completed → {asset}", scan_id)

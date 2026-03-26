@@ -65,11 +65,6 @@ consumer = KafkaConsumer(
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )
 
-producer = KafkaProducer(
-    bootstrap_servers="localhost:9092",
-    value_serializer=lambda v: json.dumps(v).encode("utf-8")
-)
-
 logger.info("🚀 Fingerprint Worker Started")
 print("Waiting for Kafka messages...")
 
@@ -211,8 +206,7 @@ for message in consumer:
                 "evidence_summary": serialized.get("evidence_summary")
             }
 
-            producer.send("fingerprint-events", fingerprint_event)
-            producer.flush()
+            send_event("fingerprint-events", fingerprint_event, key=asset)
 
             logger.info(f"📤 Fingerprint event sent → {asset}")
             send_log(f"📤 Fingerprint event sent → {asset}", scan_id)

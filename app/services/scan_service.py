@@ -1,6 +1,6 @@
 import logging
 import time
-from datetime import datetime, date
+from datetime import datetime, date, UTC
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -73,7 +73,7 @@ def store_port_scan_result(
             port=port,
             protocol=protocol,
             state=state,
-            scan_time=datetime.utcnow()
+            scan_time=datetime.now(UTC)
         )
 
         db.add(result)
@@ -112,22 +112,29 @@ def store_certificate_result(
         ).first()
 
         if existing:
-            logger.info(f"Certificate already exists → {asset_hostname}")
-            return
+            # ✅ UPDATE existing certificate
+            existing.issuer = issuer
+            existing.subject = subject
+            existing.expiry_date = expiry
+            existing.signature_algorithm = signature_algorithm
+            existing.key_size = key_size
 
-        cert = Certificate(
-            asset_id=asset.id,
-            issuer=issuer,
-            subject=subject,
-            expiry_date=expiry,
-            signature_algorithm=signature_algorithm,
-            key_size=key_size
-        )
+            logger.info(f"🔄 Certificate updated → {asset_hostname}")
 
-        db.add(cert)
+        else:
+            cert = Certificate(
+                asset_id=asset.id,
+                issuer=issuer,
+                subject=subject,
+                expiry_date=expiry,
+                signature_algorithm=signature_algorithm,
+                key_size=key_size
+            )
+
+            db.add(cert)
+            logger.info(f"💾 Certificate stored → {asset_hostname}")
+
         db.commit()
-
-        logger.info(f"💾 Certificate stored → {asset_hostname}")
 
     except SQLAlchemyError as e:
         db.rollback()
