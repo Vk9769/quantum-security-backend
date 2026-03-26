@@ -64,7 +64,7 @@ def run():
     logger.info("Initializing scan pipeline")
 
     # OPTION 1: Static domains (current behavior)
-    domains = ["digiel.pnb.bank.in"]
+    domains = ["aafiu.pnb.bank.in"]
 
     # OPTION 2: Uncomment to load from DB
     # domains = load_domains()

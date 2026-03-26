@@ -387,8 +387,8 @@ def openssl_tls(host):
             elif line.startswith("Cipher is"):
                 cipher = line.split("Cipher is", 1)[1].strip()
 
-            elif "Server Temp Key:" in line:
-                key_exchange = line.split(":", 1)[1].strip()
+            elif "Server Temp Key:" in line or "Peer Temp Key:" in line:
+                 key_exchange = line.split(":", 1)[1].strip()
 
             elif "Negotiated TLS1.3 group:" in line:
                 key_exchange = line.split(":", 1)[1].strip()

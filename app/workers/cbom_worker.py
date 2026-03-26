@@ -167,7 +167,6 @@ for message in consumer:
                 cipher_suite=cbom_data["cipher_suite"],
                 key_exchange=cbom_data["key_exchange"],
                 certificate_id=cert.id if cert else None,
-                scan_id=scan_id   # only if your service supports it
             )
 
             logger.info(f"💾 CBOM stored → {asset}")
