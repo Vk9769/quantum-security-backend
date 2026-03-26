@@ -7,7 +7,7 @@ from app.services.asset_service import store_subdomain
 from app.scanners.subdomain_scanner import discover_subdomains
 from app.workers.kafka_producer import send_asset_discovered
 from app.services.graph_service import GraphService
-
+from app.models.organization import Organization
 # ⚠️ FIX: correct import path if needed
 from app.models.topology import TopologyNode, TopologyEdge
 from app.utils.log_streamer import setup_logger
@@ -134,10 +134,18 @@ for message in consumer:
         send_log(f"📡 Discovered {len(assets)} assets", scan_id)
 
         if not assets:
-            assets = [target]
+            assets = [{
+                "subdomain": target,
+                "ip_address": None
+            }]
 
         # ---------------- PROCESS EACH ASSET ----------------
         for item in assets:
+
+            # 🔥 SAFETY CHECK
+            if not isinstance(item, dict):
+                logger.warning(f"Invalid asset format → {item}")
+                continue
 
             asset = item.get("subdomain", "").lower().strip()
             ip_address = item.get("ip_address")
