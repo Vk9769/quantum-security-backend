@@ -7,7 +7,6 @@ from kafka import KafkaProducer
 from dotenv import load_dotenv
 
 
-
 # ---------------------------------------------------
 # LOAD ENV
 # ---------------------------------------------------
@@ -40,15 +39,33 @@ def json_serializer(value):
         logger.error("JSON serialization failed")
         logger.error(e)
         return None
-    
+
+
+# ---------------------------------------------------
+# NORMALIZATION
+# ---------------------------------------------------
+
+def normalize_asset(value: str) -> str:
+    if not value:
+        return ""
+
+    return (
+        str(value).strip().lower()
+        .replace("https://", "")
+        .replace("http://", "")
+        .split(":")[0]
+        .strip("/")
+    )
+
+
 # ---------------------------------------------------
 # KAFKA PRODUCER INIT (RETRY SAFE)
 # ---------------------------------------------------
 
 producer = None
 
-def init_producer():
 
+def init_producer():
     global producer
 
     if producer:
@@ -84,7 +101,6 @@ init_producer()
 # ---------------------------------------------------
 
 def send_event(topic: str, data: dict, key: str = None):
-
     global producer
 
     if producer is None:
@@ -96,14 +112,26 @@ def send_event(topic: str, data: dict, key: str = None):
             return
 
     try:
-        
-        if "scan_id" not in data or data.get("scan_id") is None:
-            data["scan_id"] = "unknown"  # fallback (prevents None)
+        payload = dict(data) if data else {}
+
+        if "scan_id" not in payload or payload.get("scan_id") is None:
+            payload["scan_id"] = "unknown"
+
+        # normalize common asset fields
+        if payload.get("asset"):
+            payload["asset"] = normalize_asset(payload["asset"])
+
+        if payload.get("domain"):
+            payload["domain"] = normalize_asset(payload["domain"])
+
+        kafka_key = key
+        if kafka_key:
+            kafka_key = normalize_asset(kafka_key)
 
         future = producer.send(
             topic,
-            value=data,
-            key=key
+            value=payload,
+            key=kafka_key
         )
 
         metadata = future.get(timeout=10)
@@ -113,10 +141,8 @@ def send_event(topic: str, data: dict, key: str = None):
             f"partition={metadata.partition} "
             f"offset={metadata.offset}"
         )
-        
-        
-    except Exception as e:
 
+    except Exception as e:
         logger.error("Kafka event send failed")
         logger.error(e)
 
@@ -125,94 +151,137 @@ def send_event(topic: str, data: dict, key: str = None):
 # PIPELINE EVENTS
 # ---------------------------------------------------
 
-def send_scan_started(domain: str, scan_id: str):
+def send_scan_started(domain: str, scan_id: str, organization_id: str = None):
+    domain = normalize_asset(domain)
 
     event = {
         "scan_id": scan_id,
         "event_type": "scan_started",
-        "domain": domain
+        "domain": domain,
+        "organization_id": organization_id
     }
 
     send_event("scan-events", event, key=domain)
 
 
-def send_asset_discovered(asset: str, domain: str, scan_id: str):
+def send_asset_discovered(asset: str, domain: str, scan_id: str, organization_id: str = None):
+    asset = normalize_asset(asset)
+    domain = normalize_asset(domain)
 
     event = {
         "scan_id": scan_id,
         "event_type": "asset_discovered",
         "asset": asset,
-        "domain": domain
+        "domain": domain,
+        "organization_id": organization_id
     }
 
     send_event("asset-events", event, key=asset)
 
 
-def send_port_open(asset: str, port: int, scan_id: str):
+def send_port_open(asset: str, port: int, scan_id: str, organization_id: str = None):
+    asset = normalize_asset(asset)
 
     event = {
         "scan_id": scan_id,
         "event_type": "port_open",
         "asset": asset,
-        "port": port
+        "port": port,
+        "organization_id": organization_id
     }
 
     send_event("port-scan-events", event, key=asset)
 
 
-def send_tls_scan_result(asset: str, tls_version: str, cipher: str, scan_id: str):
+def send_tls_scan_result(
+    asset: str,
+    tls_version: str,
+    cipher: str,
+    scan_id: str,
+    organization_id: str = None,
+    key_exchange: str = None,
+    certificate_issuer: str = None,
+    certificate_subject: str = None,
+    signature_algorithm: str = None,
+    key_size: int = None,
+    expiry: str = None,
+    forward_secrecy: bool = None
+):
+    asset = normalize_asset(asset)
 
     event = {
         "scan_id": scan_id,
         "event_type": "tls_scan_result",
         "asset": asset,
         "tls_version": tls_version,
-        "cipher_suite": cipher
+        "cipher_suite": cipher,
+        "key_exchange": key_exchange,
+        "certificate_issuer": certificate_issuer,
+        "certificate_subject": certificate_subject,
+        "signature_algorithm": signature_algorithm,
+        "key_size": key_size,
+        "expiry": expiry,
+        "forward_secrecy": forward_secrecy,
+        "organization_id": organization_id
     }
 
     send_event("tls-events", event, key=asset)
 
 
-def send_certificate_discovered(cert_data: dict, scan_id: str):
+def send_certificate_discovered(cert_data: dict, scan_id: str, organization_id: str = None):
+    payload = dict(cert_data) if cert_data else {}
 
-    cert_data.update({
+    if payload.get("asset"):
+        payload["asset"] = normalize_asset(payload["asset"])
+
+    payload.update({
         "scan_id": scan_id,
-        "event_type": "certificate_discovered"
+        "event_type": "certificate_discovered",
+        "organization_id": organization_id
     })
 
-    send_event("certificate-events", cert_data, key=cert_data.get("asset"))
+    send_event("certificate-events", payload, key=payload.get("asset"))
 
 
-def send_cbom_generated(cbom_data: dict, scan_id: str):
+def send_cbom_generated(cbom_data: dict, scan_id: str, organization_id: str = None):
+    payload = dict(cbom_data) if cbom_data else {}
 
-    cbom_data.update({
+    if payload.get("asset"):
+        payload["asset"] = normalize_asset(payload["asset"])
+
+    payload.update({
         "scan_id": scan_id,
-        "event_type": "cbom_generated"
+        "event_type": "cbom_generated",
+        "organization_id": organization_id
     })
 
-    send_event("cbom-events", cbom_data, key=cbom_data.get("asset"))
+    send_event("cbom-events", payload, key=payload.get("asset"))
 
 
-def send_vulnerability_detected(asset: str, cve: str, scan_id: str):
+def send_vulnerability_detected(asset: str, cve: str, scan_id: str, organization_id: str = None):
+    asset = normalize_asset(asset)
 
     event = {
         "scan_id": scan_id,
         "event_type": "vulnerability_detected",
         "asset": asset,
-        "cve": cve
+        "cve": cve,
+        "organization_id": organization_id
     }
 
     send_event("vulnerability-events", event, key=asset)
 
 
-def send_alert(asset: str, severity: str, message: str, scan_id: str):
+def send_alert(asset: str, severity: str, message: str, scan_id: str, organization_id: str = None):
+    asset = normalize_asset(asset)
 
     event = {
         "scan_id": scan_id,
         "event_type": "alert",
         "asset": asset,
         "severity": severity,
-        "message": message
+        "message": message,
+        "organization_id": organization_id
     }
 
     send_event("alert-events", event, key=asset)
@@ -223,11 +292,9 @@ def send_alert(asset: str, severity: str, message: str, scan_id: str):
 # ---------------------------------------------------
 
 def close_producer():
-
     global producer
 
     if producer:
-
         try:
             producer.flush()
             producer.close()
@@ -243,33 +310,47 @@ def close_producer():
 # ---------------------------------------------------
 
 if __name__ == "__main__":
-
     logger.info("Testing Kafka Producer")
 
     scan_id = str(uuid.uuid4())
+    organization_id = "10024715-cd08-49a4-b316-4f394c14d267"
 
-    send_scan_started("bank.in", scan_id)
+    send_scan_started("bank.in", scan_id, organization_id)
 
-    send_asset_discovered("api.bank.in", "bank.in", scan_id)
+    send_asset_discovered(
+        "api.bank.in",
+        "bank.in",
+        scan_id,
+        organization_id
+    )
 
     send_tls_scan_result(
-        "api.bank.in",
-        "TLS1.3",
-        "TLS_AES_256_GCM_SHA384",
-        scan_id
+        asset="api.bank.in",
+        tls_version="TLS1.3",
+        cipher="TLS_AES_256_GCM_SHA384",
+        scan_id=scan_id,
+        organization_id=organization_id,
+        key_exchange="X25519",
+        certificate_issuer="Test CA",
+        certificate_subject="api.bank.in",
+        signature_algorithm="RSA-SHA256",
+        key_size=2048,
+        expiry="2027-12-31T00:00:00"
     )
 
     send_vulnerability_detected(
         "api.bank.in",
         "CVE-2024-12345",
-        scan_id
+        scan_id,
+        organization_id
     )
 
     send_alert(
         "api.bank.in",
         "HIGH",
         "TLS downgrade detected",
-        scan_id
+        scan_id,
+        organization_id
     )
 
     close_producer()

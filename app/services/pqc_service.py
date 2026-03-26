@@ -1,5 +1,6 @@
 import logging
 from typing import Optional
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.asset_registry import AssetRegistry
@@ -86,6 +87,141 @@ def store_pqc_analysis(db: Session, asset_id, algorithm: str, pqc_ready: bool):
     db.commit()
 
 
+def _get_asset_ip(db: Session, asset_identifier: str) -> Optional[str]:
+    """
+    Fetch IP from subdomains table using raw SQL because
+    there may not be an ORM model for subdomains yet.
+    """
+    try:
+        row = db.execute(
+            text("""
+                SELECT ip_address::text AS ip
+                FROM subdomains
+                WHERE subdomain = :subdomain
+                LIMIT 1
+            """),
+            {"subdomain": asset_identifier}
+        ).fetchone()
+
+        if row:
+            return row[0]
+    except Exception as e:
+        logger.warning(f"Unable to fetch asset IP for {asset_identifier}: {e}")
+
+    return None
+
+
+def get_pqc_asset_details(db: Session, asset_id):
+    asset = db.query(AssetRegistry).filter(
+        AssetRegistry.id == asset_id
+    ).first()
+
+    if not asset:
+        return None
+
+    tls = db.query(TLSScanResult).filter(
+        TLSScanResult.asset_id == asset.id
+    ).first()
+
+    cbom = db.query(CBOMInventory).filter(
+        CBOMInventory.asset_id == asset.id
+    ).first()
+
+    pqc = db.query(PQCAnalysis).filter(
+        PQCAnalysis.asset_id == asset.id
+    ).order_by(PQCAnalysis.id.desc()).first()
+
+    cert = db.query(Certificate).filter(
+        Certificate.asset_id == asset.id
+    ).first()
+
+    asset_ip = _get_asset_ip(db, asset.asset_identifier)
+
+    metadata_row = None
+    risk_row = None
+
+    try:
+        metadata_row = db.execute(
+            text("""
+                SELECT owner_team, environment, cloud_provider, region
+                FROM asset_metadata
+                WHERE asset_id = :asset_id
+                LIMIT 1
+            """),
+            {"asset_id": str(asset.id)}
+        ).fetchone()
+    except Exception as e:
+        logger.warning(f"Unable to fetch asset_metadata for {asset.id}: {e}")
+
+    try:
+        risk_row = db.execute(
+            text("""
+                SELECT score, risk_category
+                FROM asset_risk_scores
+                WHERE asset_id = :asset_id
+                LIMIT 1
+            """),
+            {"asset_id": str(asset.id)}
+        ).fetchone()
+    except Exception as e:
+        logger.warning(f"Unable to fetch asset_risk_scores for {asset.id}: {e}")
+
+    owner = metadata_row[0] if metadata_row else "Security Team"
+    environment = metadata_row[1] if metadata_row else None
+    cloud_provider = metadata_row[2] if metadata_row else None
+    region = metadata_row[3] if metadata_row else None
+
+    score = risk_row[0] if risk_row else None
+    risk_category = risk_row[1] if risk_row else None
+
+    tls_version = tls.tls_version if tls else (cbom.tls_version if cbom else None)
+    key_exchange = tls.key_exchange if tls else (cbom.key_exchange if cbom else None)
+    quantum_risk = cbom.quantum_risk if cbom else None
+    pqc_support = bool(pqc.pqc_ready) if pqc else False
+
+    if score is None:
+        score = 900 if pqc_support else 480
+
+    if not risk_category:
+        if pqc_support:
+            risk_category = "Low"
+        elif quantum_risk:
+            risk_category = quantum_risk.title()
+        else:
+            risk_category = "Critical"
+
+    status = asset.status or ("PQC Ready" if pqc_support else "Legacy")
+    exposure = environment or "Internet-facing"
+
+    if tls_version:
+        tls_text = tls_version
+    elif cert and cert.signature_algorithm:
+        tls_text = cert.signature_algorithm
+    else:
+        tls_text = None
+
+    return {
+        "asset_id": asset.id,
+        "name": asset.asset_identifier,
+        "owner": owner,
+        "exposure": exposure,
+        "tls": tls_text,
+        "score": score,
+        "risk_label": risk_category,
+        "status": status,
+        "ip": asset_ip,
+        "pqc_support": pqc_support,
+        "key_exchange": key_exchange,
+        "quantum_risk": quantum_risk,
+        "criticality": asset.criticality,
+        "environment": environment,
+        "cloud_provider": cloud_provider,
+        "region": region,
+        "algorithm": pqc.algorithm if pqc else None,
+        "recommended_upgrade": pqc.recommended_upgrade if pqc else None,
+    }
+
+
 def build_pqc_dashboard(db: Session, domain: Optional[str] = None):
     query = db.query(AssetRegistry)
 
@@ -127,11 +263,10 @@ def build_pqc_dashboard(db: Session, domain: Optional[str] = None):
         ).first()
 
         support = bool(pqc.pqc_ready) if pqc else False
-        tls_version = tls.tls_version if tls else None
-        key_exchange = tls.key_exchange if tls else None
+        tls_version = tls.tls_version if tls else (cbom.tls_version if cbom else None)
+        key_exchange = tls.key_exchange if tls else (cbom.key_exchange if cbom else None)
         quantum_risk = cbom.quantum_risk if cbom else None
-
-        asset_ip = None
+        asset_ip = _get_asset_ip(db, asset.asset_identifier)
 
         if support:
             elite_count += 1
@@ -240,22 +375,7 @@ def build_pqc_dashboard(db: Session, domain: Optional[str] = None):
 
     app_details = None
     if pqc_assets:
-        first_asset = pqc_assets[0]
-
-        score = 900 if first_asset["support"] else 480
-        status = "PQC Ready" if first_asset["support"] else "Legacy"
-        risk_label = "Low" if first_asset["support"] else "Critical"
-        tls_text = first_asset["key_exchange"] or first_asset["tls_version"] or "Unknown"
-
-        app_details = {
-            "name": first_asset["name"],
-            "owner": "Security Team",
-            "exposure": "Internet",
-            "tls": tls_text,
-            "score": score,
-            "risk_label": risk_label,
-            "status": status
-        }
+        app_details = get_pqc_asset_details(db, pqc_assets[0]["asset_id"])
 
     recommendations = list(recommendations_set)
     if not recommendations:
