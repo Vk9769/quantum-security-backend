@@ -68,3 +68,25 @@ def add_employee(
         "message": "Employee created successfully",
         "employee_id": str(employee.id)
     }
+    
+# ===============================
+# DELETE EMPLOYEE
+# ===============================
+@router.delete("/delete/{employee_id}")
+def delete_employee(
+    employee_id: UUID,
+    organization_id: UUID,
+    db: Session = Depends(get_db)
+):
+    employee = db.query(Employee).filter(
+        Employee.id == employee_id,
+        Employee.organization_id == organization_id
+    ).first()
+
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    db.delete(employee)
+    db.commit()
+
+    return {"message": "Employee deleted successfully"}

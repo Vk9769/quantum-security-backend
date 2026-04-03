@@ -114,3 +114,11 @@ def redis_health_check():
         return True
     except Exception:
         return False
+    
+def get_redis_client():
+    """
+    Return Redis client instance
+    """
+    if redis_client is None:
+        raise Exception("Redis is not connected")
+    return redis_client

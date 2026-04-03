@@ -24,7 +24,11 @@ class ScanJob(Base):
 
     scan_type = Column(String)
     trigger = Column(String)
-    status = Column(String)
+
+    # 🔥 UPDATED (only change)
+    status = Column(String, default="running", index=True)
+    
+    domain = Column(String)
 
     started_at = Column(DateTime)
     finished_at = Column(DateTime)

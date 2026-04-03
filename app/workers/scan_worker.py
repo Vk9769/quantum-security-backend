@@ -5,6 +5,10 @@ from kafka import KafkaConsumer
 from app.services.graph_service import GraphService
 from app.workers.kafka_producer import send_event  # 🔥 IMPORTANT
 
+# ✅ NEW IMPORTS (added)
+from app.db.postgres import SessionLocal
+from app.models.scan_jobs import ScanJob
+
 
 # -------------------- INIT --------------------
 
@@ -59,6 +63,31 @@ def send_log(message: str, scan_id=None):
     })
 
 
+# ✅ NEW FUNCTION (SCAN CONTROL)
+def is_scan_active(scan_id):
+    if not scan_id:
+        return True
+
+    db = SessionLocal()
+
+    try:
+        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+
+        if not scan:
+            return False
+
+        if scan.status == "paused":
+            return "paused"
+
+        if scan.status == "stopped":
+            return False
+
+        return True
+
+    finally:
+        db.close()
+
+
 # -------------------- MAIN LOOP --------------------
 
 for message in consumer:
@@ -67,6 +96,18 @@ for message in consumer:
 
         event = message.value
         event_type = event.get("event_type")
+
+        # ✅ NEW CONTROL LOGIC
+        scan_id = event.get("scan_id")
+        status = is_scan_active(scan_id)
+
+        if status == "paused":
+            logger.info(f"⏸ Scan paused → {scan_id}")
+            continue
+
+        if status is False:
+            logger.info(f"⛔ Scan stopped → {scan_id}")
+            continue
 
         logger.info(f"📩 Event received → {event_type}")
 
@@ -78,7 +119,7 @@ for message in consumer:
             domain = event["domain"]
 
             logger.info(f"🔍 Scan started for {domain}")
-            send_log(f"🔍 Scan started for {domain}", event.get("scan_id"))
+            send_log(f"🔍 Scan started for {domain}", scan_id)
 
             graph.create_domain(domain)
 
@@ -92,7 +133,7 @@ for message in consumer:
             domain = event.get("domain") or extract_domain(asset)
 
             logger.info(f"🌐 Asset discovered → {asset}")
-            send_log(f"🌐 Asset discovered → {asset}")
+            send_log(f"🌐 Asset discovered → {asset}", scan_id)
 
             graph.create_domain(domain)
             graph.create_asset(domain, asset)
@@ -107,7 +148,7 @@ for message in consumer:
             port = event["port"]
 
             logger.info(f"🔓 Open port → {asset}:{port}")
-            send_log(f"🔓 Port open → {asset}:{port}")
+            send_log(f"🔓 Port open → {asset}:{port}", scan_id)
 
             graph.add_port(asset, port)
 
@@ -124,7 +165,8 @@ for message in consumer:
             )
 
             send_log(
-                f"🔐 TLS → {asset} ({event['tls_version']})"
+                f"🔐 TLS → {asset} ({event['tls_version']})",
+                scan_id
             )
 
             graph.add_tls(
@@ -146,7 +188,8 @@ for message in consumer:
             )
 
             send_log(
-                f"📜 Certificate → {asset} (Issuer: {event['issuer']})"
+                f"📜 Certificate → {asset} (Issuer: {event['issuer']})",
+                scan_id
             )
 
             graph.add_certificate(
@@ -171,7 +214,8 @@ for message in consumer:
             )
 
             send_log(
-                f"🧾 CBOM → {asset}"
+                f"🧾 CBOM → {asset}",
+                scan_id
             )
 
             graph.add_cbom(
@@ -187,7 +231,7 @@ for message in consumer:
         # ============================================
         else:
             logger.warning(f"⚠️ Unknown event type: {event_type}")
-            send_log(f"⚠️ Unknown event: {event_type}")
+            send_log(f"⚠️ Unknown event: {event_type}", scan_id)
 
 
     except Exception as e:

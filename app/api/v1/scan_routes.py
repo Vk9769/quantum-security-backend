@@ -46,11 +46,12 @@ def start_scan(payload: ScanRequest):
         # 1. CREATE SCAN JOB
         # ============================================
         scan_job = ScanJob(
-            organization_id="10024715-cd08-49a4-b316-4f394c14d267",  # TODO: dynamic later
+            organization_id="10024715-cd08-49a4-b316-4f394c14d267",
             scan_type="full",
             trigger="manual",
             status="running",
-            started_at=datetime.utcnow()
+            started_at=datetime.utcnow(),
+            domain=domain  # ✅ ADD THIS
         )
 
         db.add(scan_job)
@@ -114,29 +115,31 @@ def start_scan(payload: ScanRequest):
 
 
 # ============================================
-# SCAN STATUS
+# SCAN STATUS (FIXED - USE scan_id)
 # ============================================
 
-@router.get("/status/{domain}")
-def scan_status(domain: str):
+@router.get("/status/{scan_id}")
+def scan_status(scan_id: str):
     db = SessionLocal()
 
     try:
-        scan = db.query(ScanJob) \
-            .order_by(ScanJob.started_at.desc()) \
-            .first()
+        # 🔥 GET SPECIFIC SCAN BY ID (NOT latest)
+        scan = db.query(ScanJob).filter(
+            ScanJob.id == scan_id
+        ).first()
 
         if not scan:
             return {
-                "domain": domain,
+                "scan_id": scan_id,
                 "status": "not_found"
             }
 
         return {
-            "domain": domain,
-            "status": scan.status,
             "scan_id": str(scan.id),
-            "started_at": scan.started_at
+            "domain": scan.domain if hasattr(scan, "domain") else "unknown",
+            "status": scan.status,
+            "started_at": scan.started_at,
+            "finished_at": scan.finished_at
         }
 
     finally:
@@ -157,3 +160,110 @@ async def scan_websocket(websocket: WebSocket):
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+
+# ============================================
+# 🔥 NEW APIs FOR FRONTEND CONTROL
+# ============================================
+
+# GET ALL SCANS
+@router.get("")
+def get_all_scans():
+    db = SessionLocal()
+
+    try:
+        scans = db.query(ScanJob).order_by(ScanJob.started_at.desc()).all()
+
+        return [
+            {
+                "id": str(s.id),
+                "domain": s.domain or "unknown",  # ✅ FIXED
+                "status": s.status
+            }
+            for s in scans
+        ]
+
+    finally:    
+        db.close()
+
+
+# PAUSE SCAN
+@router.post("/{scan_id}/pause")
+def pause_scan(scan_id: str):
+    db = SessionLocal()
+
+    try:
+        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+
+        scan.status = "paused"
+        db.commit()
+
+        return {"message": "Scan paused"}
+
+    finally:
+        db.close()
+
+
+# RESUME SCAN
+@router.post("/{scan_id}/resume")
+def resume_scan(scan_id: str):
+    db = SessionLocal()
+
+    try:
+        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+
+        scan.status = "running"
+        db.commit()
+
+        return {"message": "Scan resumed"}
+
+    finally:
+        db.close()
+
+
+# STOP SCAN
+@router.post("/{scan_id}/stop")
+def stop_scan(scan_id: str):
+    db = SessionLocal()
+
+    try:
+        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+
+        scan.status = "stopped"
+        scan.finished_at = datetime.utcnow()
+
+        db.commit()
+
+        return {"message": "Scan stopped"}
+
+    finally:
+        db.close()
+
+
+# DELETE SCAN
+@router.delete("/{scan_id}")
+def delete_scan(scan_id: str):
+    db = SessionLocal()
+
+    try:
+        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+
+        db.delete(scan)
+        db.commit()
+
+        return {"message": "Scan deleted"}
+
+    finally:
+        db.close()

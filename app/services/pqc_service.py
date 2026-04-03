@@ -268,24 +268,26 @@ def build_pqc_dashboard(db: Session, domain: Optional[str] = None):
         quantum_risk = cbom.quantum_risk if cbom else None
         asset_ip = _get_asset_ip(db, asset.asset_identifier)
 
-        if support:
+        # ✅ NEW CORRECT CLASSIFICATION LOGIC
+        if support and tls_version and tls_version.upper() in ["TLSV1.3", "TLS1.3"]:
             elite_count += 1
             ready_count += 1
+
+        elif support:
+            standard_count += 1
+            standard_status_count += 1
+
+        elif quantum_risk and quantum_risk.upper() == "CRITICAL":
+            critical_count += 1
+            critical_status_count += 1
+            recommendations_set.add("Immediate migration from vulnerable cryptography")
+            recommendations_set.add("Implement Kyber for key exchange")
+
         else:
-            if quantum_risk and quantum_risk.upper() == "CRITICAL":
-                critical_count += 1
-                critical_status_count += 1
-                recommendations_set.add("Immediate migration from vulnerable cryptography")
-                recommendations_set.add("Implement Kyber for key exchange")
-            elif tls_version and tls_version.upper() in ["TLSV1.3", "TLS1.3"]:
-                standard_count += 1
-                standard_status_count += 1
-                recommendations_set.add("Upgrade key exchange to PQC-hybrid mode")
-            else:
-                legacy_count += 1
-                legacy_status_count += 1
-                recommendations_set.add("Upgrade to TLS 1.3 with PQC")
-                recommendations_set.add("Update cryptographic libraries")
+            legacy_count += 1
+            legacy_status_count += 1
+            recommendations_set.add("Upgrade to TLS 1.3 with PQC")
+            recommendations_set.add("Update cryptographic libraries")
 
         if cert and cert.signature_algorithm:
             algo = cert.signature_algorithm.lower()
@@ -296,7 +298,7 @@ def build_pqc_dashboard(db: Session, domain: Optional[str] = None):
             "asset_id": asset.id,
             "name": asset.asset_identifier,
             "ip": asset_ip,
-            "support": support,
+            "support": support and tls_version and tls_version.upper() in ["TLSV1.3", "TLS1.3"],
             "tls_version": tls_version,
             "key_exchange": key_exchange,
             "quantum_risk": quantum_risk
@@ -339,14 +341,19 @@ def build_pqc_dashboard(db: Session, domain: Optional[str] = None):
             "color": "bg-emerald-400"
         },
         {
+            "label": "Standard",   # ✅ FIXED NAME
+            "value": standard_count,
+            "color": "bg-sky-500"
+        },
+        {
+            "label": "Legacy",     # ✅ ADD THIS (VERY IMPORTANT)
+            "value": legacy_count,
+            "color": "bg-amber-500"
+        },
+        {
             "label": "Critical",
             "value": critical_count,
             "color": "bg-red-500"
-        },
-        {
-            "label": "Std",
-            "value": standard_count,
-            "color": "bg-violet-500"
         },
     ]
 

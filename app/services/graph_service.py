@@ -14,6 +14,22 @@ class GraphService:
             auth=(NEO4J_USER, NEO4J_PASSWORD)
         )
         
+    def add_ip(self, asset, ip):
+
+        if not ip:
+            return
+
+        query = """
+        MERGE (a:Asset {name:$asset})
+        MERGE (ip:IP {address:$ip})
+        MERGE (a)-[:RESOLVES_TO]->(ip)
+        """
+
+        self.execute(query, {
+            "asset": asset,
+            "ip": ip
+        })
+        
     def close(self):
         self.driver.close()
         
@@ -167,25 +183,29 @@ class GraphService:
             query = """
             MATCH (d:Domain {name:$domain})
             OPTIONAL MATCH (d)-[:OWNS]->(a:Asset)
+            OPTIONAL MATCH (a)-[:RESOLVES_TO]->(ip:IP)
             OPTIONAL MATCH (a)-[:HAS_PORT]->(p:Port)
             OPTIONAL MATCH (a)-[:HAS_TLS]->(t:TLS)
             OPTIONAL MATCH (a)-[:HAS_CERTIFICATE]->(c:Certificate)
             OPTIONAL MATCH (a)-[:HAS_CBOM]->(cb:CBOM)
 
-            RETURN d,a,p,t,c,cb
+            RETURN d,a,ip,p,t,c,cb
             LIMIT 2000
             """
-            params = {"domain": domain}
+            
+            params = {"domain": domain}   # ✅ ADD THIS LINE
+            
         else:
             query = """
             MATCH (d:Domain)
             OPTIONAL MATCH (d)-[:OWNS]->(a:Asset)
+            OPTIONAL MATCH (a)-[:RESOLVES_TO]->(ip:IP)
             OPTIONAL MATCH (a)-[:HAS_PORT]->(p:Port)
             OPTIONAL MATCH (a)-[:HAS_TLS]->(t:TLS)
             OPTIONAL MATCH (a)-[:HAS_CERTIFICATE]->(c:Certificate)
             OPTIONAL MATCH (a)-[:HAS_CBOM]->(cb:CBOM)
 
-            RETURN d,a,p,t,c,cb
+            RETURN d,a,ip,p,t,c,cb
             LIMIT 2000
             """
             params = {}
@@ -201,6 +221,7 @@ class GraphService:
 
                 d = record["d"]
                 a = record["a"]
+                ip = record["ip"]   # ✅ ADD THIS
                 p = record["p"]
                 t = record["t"]
                 c = record["c"]
@@ -236,6 +257,22 @@ class GraphService:
 
                     if d:
                         edges.add((domain_id, asset_id))
+                        
+                # -------------------------
+                # IP NODE  🔥 NEW
+                # -------------------------
+
+                if ip and a:
+
+                    ip_id = f"ip:{ip['address']}"
+
+                    nodes[ip_id] = {
+                        "id": ip_id,
+                        "label": ip["address"],
+                        "type": "ip"
+                    }
+
+                    edges.add((asset_id, ip_id))
 
                 # -------------------------
                 # PORT

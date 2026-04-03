@@ -200,6 +200,13 @@ for message in consumer:
                     scan_id,
                     organization_id
                 )
+                
+                # 🔥 ADD IP TO GRAPH
+                try:
+                    if ip_address:
+                        graph.add_ip(asset, ip_address)
+                except Exception as e:
+                    logger.warning(f"IP graph insert failed for {asset}: {e}")
 
                 # LIVE UI
                 if ip_address:
