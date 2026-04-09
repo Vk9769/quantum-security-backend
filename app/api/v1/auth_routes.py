@@ -7,15 +7,42 @@ from app.core.auth import hash_password, verify_password, create_access_token
 from app.models.user import User
 from app.models.organization import Organization
 
+# ✅ NEW IMPORT (OTP Redis)
+from app.db.redis import get_redis_client
+
 router = APIRouter()
 
 
 # ==========================================
-# COMPANY REGISTER
+# COMPANY REGISTER (WITH OTP VERIFICATION)
 # ==========================================
 
 @router.post("/company/register")
 def register_company(data: dict, db: Session = Depends(get_db)):
+
+    # ==========================
+    # ✅ OTP VERIFICATION (NEW)
+    # ==========================
+    redis = get_redis_client()
+
+    key = f"otp:{data['admin_email']}"
+    stored_otp = redis.get(key)
+
+    if not stored_otp:
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    if isinstance(stored_otp, bytes):
+        stored_otp = stored_otp.decode()
+
+    if stored_otp != data.get("otp"):
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    # delete OTP after success
+    redis.delete(key)
+
+    # ==========================
+    # EXISTING LOGIC (UNCHANGED)
+    # ==========================
 
     # Check if email already exists
     existing_user = db.query(User).filter(User.email == data["admin_email"]).first()
@@ -53,7 +80,7 @@ def register_company(data: dict, db: Session = Depends(get_db)):
 
 
 # ==========================================
-# LOGIN
+# LOGIN (UNCHANGED)
 # ==========================================
 
 @router.post("/login")

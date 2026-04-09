@@ -86,9 +86,8 @@ If you didn't request this, ignore this email.
         msg.attach(MIMEText(text_body, "plain"))
         msg.attach(MIMEText(html_body, "html"))
 
-        # SMTP
-        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=15)
-        server.starttls()
+        # ✅ FIXED SMTP (ONLY CHANGE)
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15)
         server.login(EMAIL_USER, EMAIL_PASS)
         server.send_message(msg)
         server.quit()
@@ -99,4 +98,4 @@ If you didn't request this, ignore this email.
         print("❌ Authentication failed (check App Password)")
 
     except Exception as e:
-        print(f"❌ Email error: {e}")
+        print(f"❌ Email error: {e}")   

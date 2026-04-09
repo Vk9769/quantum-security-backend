@@ -14,6 +14,12 @@ from app.models.certificate import Certificate
 from app.workers.kafka_producer import send_event
 from app.utils.log_streamer import setup_logger
 
+# ✅ SCAN CONTROL
+from app.utils.scan_control import check_scan_control
+
+# ✅ CHECKPOINT
+from app.utils.checkpoint import save_checkpoint, get_checkpoint
+
 
 # -------------------- LOG TO KAFKA --------------------
 def send_log(message: str, scan_id: str = None):
@@ -106,10 +112,25 @@ print("Waiting for Kafka messages...")
 
 # -------------------- MAIN LOOP --------------------
 for message in consumer:
-    print("KAFKA MESSAGE RECEIVED:", message.value)
     event = message.value
+    print("KAFKA MESSAGE RECEIVED:", event)
 
     scan_id = event.get("scan_id")
+
+    # =====================================================
+    # 🔥 GLOBAL CONTROL
+    # =====================================================
+    status = check_scan_control(scan_id)
+
+    if status == "paused":
+        time.sleep(2)
+        continue
+
+    if status == "stopped":
+        logger.info(f"⛔ Scan stopped → {scan_id}")
+        continue
+
+    # =====================================================
 
     if not scan_id:
         logger.warning("No scan_id for certificate event")
@@ -122,14 +143,47 @@ for message in consumer:
     if not host:
         continue
 
+    # ---------------- CHECKPOINT RESUME ----------------
+    checkpoint = get_checkpoint(scan_id)
+    resume_asset = checkpoint.get("last_asset") if checkpoint else None
+
+    skip = True if resume_asset else False
+
+    if skip:
+        if host == resume_asset:
+            skip = False
+        else:
+            logger.info(f"⏭ Skipping (resume) → {host}")
+            continue
+
     db: Session = SessionLocal()
 
     try:
         logger.info(f"🔐 Processing certificate → {host}")
         send_log(f"🔐 Processing certificate → {host}", scan_id)
 
+        # ---------------- CONTROL CHECK BEFORE WORK ----------------
+        status = check_scan_control(scan_id)
+
+        if status == "stopped":
+            logger.info(f"⛔ Stopped before processing → {host}")
+            continue
+
+        if status == "paused":
+            time.sleep(2)
+            continue
+
         # ------------------------------------------------
-        # 1️⃣ GET ASSET
+        # 1️⃣ SAVE CHECKPOINT
+        # ------------------------------------------------
+        save_checkpoint(
+            scan_id=scan_id,
+            stage="certificate_scan",
+            last_asset=host
+        )
+
+        # ------------------------------------------------
+        # 2️⃣ GET ASSET
         # ------------------------------------------------
         asset = get_asset_with_retry(db, host)
 
@@ -139,7 +193,7 @@ for message in consumer:
             continue
 
         # ------------------------------------------------
-        # 2️⃣ GET CERTIFICATE
+        # 3️⃣ GET CERTIFICATE
         # ------------------------------------------------
         cert = None
 
@@ -161,11 +215,25 @@ for message in consumer:
             logger.info("TLS event had no certificate → fallback scan")
             send_log(f"🔍 Fallback certificate scan → {host}", scan_id)
 
+            # 🔥 CONTROL CHECK BEFORE HEAVY SCAN
+            status = check_scan_control(scan_id)
+
+            if status == "stopped":
+                logger.info(f"⛔ Stopped before fallback scan → {host}")
+                continue
+
             try:
                 cert = get_certificate_info(host)
             except Exception as e:
                 logger.warning(f"Fallback certificate scan failed → {host} | {e}")
                 cert = None
+
+            # 🔥 CONTROL CHECK AFTER HEAVY SCAN
+            status = check_scan_control(scan_id)
+
+            if status == "stopped":
+                logger.info(f"⛔ Stopped after fallback scan → {host}")
+                continue
 
             if not cert:
                 logger.warning(f"No certificate available → {host}")
@@ -173,11 +241,6 @@ for message in consumer:
                 continue
 
             cert["expiry"] = parse_expiry(cert.get("expiry"))
-
-        # ------------------------------------------------
-        # 3️⃣ CHECK DUPLICATE
-        # ------------------------------------------------
-
 
         # ------------------------------------------------
         # 4️⃣ STORE CERTIFICATE

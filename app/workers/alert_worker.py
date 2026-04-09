@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
 from datetime import datetime, UTC
@@ -7,7 +8,16 @@ from datetime import datetime, UTC
 from app.db.postgres import SessionLocal
 from app.models.alert import Alert
 from app.models.asset_registry import AssetRegistry
-from app.workers.kafka_producer import send_event  # 🔥 IMPORTANT
+from app.workers.kafka_producer import send_event
+
+# ✅ CONTROL
+from app.utils.scan_control import check_scan_control
+
+# ✅ NEW (RUNTIME CONTROL - INSTANT STOP)
+from app.utils.runtime_control import is_stopped, is_paused
+
+# ✅ CHECKPOINT
+from app.utils.checkpoint import save_checkpoint
 
 
 # -------------------- LOGGING --------------------
@@ -23,7 +33,7 @@ logging.getLogger("kafka").setLevel(logging.WARNING)
 logger = logging.getLogger("AlertWorker")
 
 
-# -------------------- SEND LOG TO UI --------------------
+# -------------------- SEND LOG --------------------
 
 def send_log(message: str, scan_id: str = None):
     send_event("scan-logs", {
@@ -33,7 +43,7 @@ def send_log(message: str, scan_id: str = None):
     })
 
 
-# -------------------- KAFKA CONSUMER --------------------
+# -------------------- KAFKA --------------------
 
 consumer = KafkaConsumer(
     "alert-events",
@@ -57,6 +67,32 @@ for message in consumer:
     event = message.value
     scan_id = event.get("scan_id")
 
+    # =====================================================
+    # 🔥 HYBRID CONTROL (INSTANT + DB)
+    # =====================================================
+
+    # ⚡ 1. INSTANT MEMORY CHECK (FASTEST)
+    if is_stopped(scan_id):
+        logger.info(f"⛔ Hard stop detected → {scan_id}")
+        continue
+
+    if is_paused(scan_id):
+        time.sleep(2)
+        continue
+
+    # ⚡ 2. DB FALLBACK CHECK
+    status = check_scan_control(scan_id)
+
+    if status == "paused":
+        time.sleep(2)
+        continue
+
+    if status == "stopped":
+        logger.info(f"⛔ Scan stopped → {scan_id}")
+        continue
+
+    # =====================================================
+
     try:
 
         if event.get("event_type") != "alert":
@@ -65,6 +101,26 @@ for message in consumer:
         asset = event.get("asset")
         severity = event.get("severity", "UNKNOWN")
         message_text = event.get("message", "")
+
+        # =====================================================
+        # 🔥 CHECK BEFORE PROCESSING (CRITICAL)
+        # =====================================================
+        if is_stopped(scan_id):
+            logger.info(f"⛔ Stopped before processing alert → {scan_id}")
+            continue
+
+        # =====================================================
+
+        # ✅ SAVE CHECKPOINT BEFORE PROCESSING
+        save_checkpoint(
+            scan_id=scan_id,
+            stage="alert_processing",
+            last_asset=asset,
+            last_event="alert",
+            meta={
+                "severity": severity
+            }
+        )
 
         log_msg = f"🚨 ALERT [{severity}] → {asset} | {message_text}"
 
@@ -75,6 +131,13 @@ for message in consumer:
 
         try:
 
+            # =====================================================
+            # 🔥 CHECK BEFORE DB WORK (VERY IMPORTANT)
+            # =====================================================
+            if is_stopped(scan_id):
+                logger.info(f"⛔ Stopped before DB insert → {scan_id}")
+                continue
+
             asset_record = db.query(AssetRegistry).filter(
                 AssetRegistry.asset_identifier == asset
             ).first()
@@ -83,6 +146,13 @@ for message in consumer:
                 warn_msg = f"⚠️ Asset not found → {asset}"
                 logger.warning(warn_msg)
                 send_log(warn_msg, scan_id)
+                continue
+
+            # =====================================================
+            # 🔥 FINAL CHECK BEFORE WRITE
+            # =====================================================
+            if is_stopped(scan_id):
+                logger.info(f"⛔ Stopped before alert save → {scan_id}")
                 continue
 
             alert = Alert(

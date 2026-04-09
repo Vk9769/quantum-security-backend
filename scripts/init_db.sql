@@ -3,6 +3,20 @@
 BEGIN;
 
 
+CREATE TABLE IF NOT EXISTS public.ai_agent_results
+(
+    id uuid NOT NULL DEFAULT uuid_generate_v4(),
+    scan_id uuid,
+    asset_id uuid NOT NULL,
+    agent_name text COLLATE pg_catalog."default" NOT NULL,
+    result_type text COLLATE pg_catalog."default" NOT NULL,
+    severity text COLLATE pg_catalog."default",
+    confidence double precision,
+    result_data jsonb NOT NULL,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ai_agent_results_pkey PRIMARY KEY (id)
+);
+
 CREATE TABLE IF NOT EXISTS public.alert_events
 (
     id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -111,7 +125,8 @@ CREATE TABLE IF NOT EXISTS public.asset_registry
     last_seen timestamp without time zone,
     status text COLLATE pg_catalog."default",
     criticality text COLLATE pg_catalog."default",
-    CONSTRAINT asset_registry_pkey PRIMARY KEY (id)
+    CONSTRAINT asset_registry_pkey PRIMARY KEY (id),
+    CONSTRAINT unique_asset_identifier UNIQUE (asset_identifier)
 );
 
 CREATE TABLE IF NOT EXISTS public.asset_risk_scores
@@ -311,6 +326,17 @@ CREATE TABLE IF NOT EXISTS public.risk_scores
     CONSTRAINT risk_scores_pkey PRIMARY KEY (id)
 );
 
+CREATE TABLE IF NOT EXISTS public.scan_checkpoints
+(
+    scan_id uuid NOT NULL,
+    stage text COLLATE pg_catalog."default",
+    last_asset text COLLATE pg_catalog."default",
+    last_event text COLLATE pg_catalog."default",
+    meta jsonb,
+    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT scan_checkpoints_pkey PRIMARY KEY (scan_id)
+);
+
 CREATE TABLE IF NOT EXISTS public.scan_deltas
 (
     id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -341,6 +367,7 @@ CREATE TABLE IF NOT EXISTS public.scan_jobs
     status text COLLATE pg_catalog."default",
     started_at timestamp without time zone,
     finished_at timestamp without time zone,
+    domain text COLLATE pg_catalog."default",
     CONSTRAINT scan_jobs_pkey PRIMARY KEY (id)
 );
 
@@ -415,6 +442,24 @@ CREATE TABLE IF NOT EXISTS public.vulnerabilities
     CONSTRAINT vulnerabilities_pkey PRIMARY KEY (id),
     CONSTRAINT vulnerabilities_cve_id_key UNIQUE (cve_id)
 );
+
+ALTER TABLE IF EXISTS public.ai_agent_results
+    ADD CONSTRAINT ai_agent_results_asset_id_fkey FOREIGN KEY (asset_id)
+    REFERENCES public.asset_registry (id) MATCH SIMPLE
+    ON UPDATE NO ACTION
+    ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_ai_agent_results_asset_id
+    ON public.ai_agent_results(asset_id);
+
+
+ALTER TABLE IF EXISTS public.ai_agent_results
+    ADD CONSTRAINT ai_agent_results_scan_id_fkey FOREIGN KEY (scan_id)
+    REFERENCES public.scan_jobs (id) MATCH SIMPLE
+    ON UPDATE NO ACTION
+    ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_ai_agent_results_scan_id
+    ON public.ai_agent_results(scan_id);
+
 
 ALTER TABLE IF EXISTS public.alert_events
     ADD CONSTRAINT alert_events_alert_id_fkey FOREIGN KEY (alert_id)

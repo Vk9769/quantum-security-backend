@@ -3,7 +3,7 @@ import logging
 import time
 from datetime import datetime, UTC
 
-from kafka import KafkaConsumer, KafkaProducer
+from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
 
 from app.scanners.tls_scanner import scan_tls
@@ -13,6 +13,12 @@ from app.models.asset_registry import AssetRegistry
 from app.services.graph_service import GraphService
 from app.utils.log_streamer import setup_logger
 from app.workers.kafka_producer import send_event
+
+# ✅ CONTROL
+from app.utils.scan_control import check_scan_control
+
+# ✅ CHECKPOINT
+from app.utils.checkpoint import save_checkpoint, get_checkpoint
 
 
 # -------------------- HELPERS --------------------
@@ -30,15 +36,12 @@ def detect_forward_secrecy(tls_version: str, cipher: str, key_exchange: str) -> 
     cipher = (cipher or "").upper().strip()
     key_exchange = (key_exchange or "").upper().strip()
 
-    # TLS 1.3 uses ephemeral key exchange by design
     if tls_version in ["TLSV1.3", "TLS1.3"]:
         return True
 
-    # TLS 1.2 / older ciphers with DHE / ECDHE
     if "DHE" in cipher:
         return True
 
-    # Explicit negotiated group / exchange hints
     if any(k in key_exchange for k in [
         "DHE", "ECDHE", "ECDH", "X25519", "X448", "SECP", "P-256", "P-384", "P-521",
         "KYBER", "MLKEM"
@@ -75,7 +78,6 @@ consumer = KafkaConsumer(
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )
 
-
 logger.info("🚀 TLS Worker Started")
 print("Waiting for Kafka messages...")
 
@@ -88,6 +90,19 @@ for message in consumer:
 
     scan_id = event.get("scan_id")
     asset = event.get("asset")
+
+    # ============================================
+    # 🔥 GLOBAL CONTROL (FAST CHECK)
+    # ============================================
+    status = check_scan_control(scan_id)
+
+    if status == "paused":
+        time.sleep(2)
+        continue
+
+    if status == "stopped":
+        logger.info(f"⛔ Scan stopped → {scan_id}")
+        continue
 
     try:
         if event.get("event_type") != "port_open":
@@ -102,15 +117,54 @@ for message in consumer:
 
         if not scan_id:
             logger.warning(f"⚠ Missing scan_id for TLS → {asset}")
-            
+
+        # ==============================
+        # CHECKPOINT RESUME LOGIC
+        # ==============================
+        checkpoint = get_checkpoint(scan_id)
+
+        skip = False
+        if checkpoint:
+            last_asset = checkpoint.get("last_asset")
+            skip = True if last_asset else False
+        else:
+            last_asset = None
+
+        if skip:
+            if asset == last_asset:
+                skip = False
+            else:
+                logger.info(f"⏭ Skipping already processed TLS → {asset}")
+                continue
+
+        # ============================================
+        # 🔥 CONTROL BEFORE SCAN (CRITICAL)
+        # ============================================
+        status = check_scan_control(scan_id)
+
+        if status == "stopped":
+            logger.info(f"⛔ Stopped before TLS scan → {asset}")
+            continue
+
+        if status == "paused":
+            time.sleep(2)
+            continue
+
         logger.info(f"🔐 TLS Scan started → {asset}")
         send_log(f"🔐 TLS scan started → {asset}", scan_id)
 
-        # ✅ INIT DB EARLY
+        # SAVE CHECKPOINT
+        save_checkpoint(
+            scan_id=scan_id,
+            stage="tls_scan",
+            last_asset=asset
+        )
+
         db: Session = SessionLocal()
 
-
-        # ---------------- SCAN TLS ----------------
+        # ============================================
+        # 🔥 RUN TLS SCAN (BLOCKING)
+        # ============================================
         try:
             result = scan_tls(asset)
         except Exception as e:
@@ -118,7 +172,16 @@ for message in consumer:
             logger.error(e)
             result = None
 
-        # ---------------- FALLBACK ----------------
+        # ============================================
+        # 🔥 CONTROL AFTER SCAN (CRITICAL FIX)
+        # ============================================
+        status = check_scan_control(scan_id)
+
+        if status == "stopped":
+            logger.info(f"⛔ Stopped after TLS scan → {asset}")
+            db.close()
+            continue
+
         if not result:
             logger.warning(f"TLS handshake failed → {asset}")
             send_log(f"❌ TLS handshake failed → {asset}", scan_id)
@@ -142,12 +205,14 @@ for message in consumer:
                 "key_size": None,
                 "expiry": None
             }, key=asset)
+
+            db.close()
             continue
 
-        # Normalize extracted values
         tls_version = result.get("tls_version")
         cipher_suite = result.get("cipher_suite")
         key_exchange = result.get("key_exchange")
+
         forward_secrecy = detect_forward_secrecy(
             tls_version=tls_version,
             cipher=cipher_suite,
@@ -158,6 +223,18 @@ for message in consumer:
             asset_record = None
 
             for _ in range(3):
+
+                # 🔥 CONTROL INSIDE RETRY LOOP
+                status = check_scan_control(scan_id)
+
+                if status == "stopped":
+                    logger.info(f"⛔ Stopped during DB lookup → {asset}")
+                    break
+
+                if status == "paused":
+                    time.sleep(2)
+                    continue
+
                 asset_record = db.query(AssetRegistry).filter(
                     AssetRegistry.asset_identifier == asset
                 ).first()
@@ -165,11 +242,9 @@ for message in consumer:
                 if asset_record:
                     break
 
-                logger.warning(f"Asset not found → {asset}, retrying...")
                 time.sleep(2)
 
             if not asset_record:
-                logger.warning(f"Asset still missing → {asset}")
                 send_log(f"⚠ Asset not found for TLS result → {asset}", scan_id)
                 continue
 
@@ -178,17 +253,13 @@ for message in consumer:
             ).first()
 
             if existing:
-                # ✅ UPDATE existing record
                 existing.tls_version = tls_version
                 existing.cipher_suite = cipher_suite
                 existing.key_exchange = key_exchange
                 existing.forward_secrecy = forward_secrecy
                 existing.scan_time = datetime.now(UTC)
 
-                logger.info(f"🔄 TLS updated → {asset}")
-
             else:
-                # ✅ INSERT new record
                 tls_result = TLSScanResult(
                     asset_id=asset_record.id,
                     tls_version=tls_version,
@@ -199,14 +270,11 @@ for message in consumer:
                 )
 
                 db.add(tls_result)
-                logger.info(f"💾 TLS stored → {asset}")
 
             db.commit()
 
-            # ---------------- GRAPH UPDATE ----------------
             try:
                 graph.add_tls(asset, tls_version, cipher_suite)
-                logger.info(f"Graph updated → TLS for {asset}")
             except Exception as e:
                 logger.error("Neo4j TLS update failed")
                 logger.error(e)
@@ -220,7 +288,6 @@ for message in consumer:
         finally:
             db.close()
 
-        # ---------------- SEND NEXT EVENT ----------------
         send_event("tls-events", {
             "scan_id": scan_id,
             "event_type": "tls_scan_result",

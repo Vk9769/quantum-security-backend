@@ -16,6 +16,9 @@ from app.services.asset_fingerprint_service import (
 from app.utils.log_streamer import setup_logger
 from app.workers.kafka_producer import send_event
 
+# ✅ UPDATED IMPORT (USE CENTRAL SCAN CONTROL)
+from app.utils.scan_control import is_scan_active
+
 
 # --------------------------------------------------
 # LOG STREAM
@@ -77,6 +80,17 @@ for message in consumer:
 
     event = message.value
     scan_id = event.get("scan_id")
+
+    # 🔥 SCAN CONTROL (NOW CENTRALIZED)
+    status = is_scan_active(scan_id)
+
+    if status == "paused":
+        logger.info(f"⏸ Scan paused → {scan_id}")
+        continue
+
+    if status is False:
+        logger.info(f"⛔ Scan stopped → {scan_id}")
+        continue
 
     try:
         if event.get("event_type") != "asset_discovered":

@@ -11,6 +11,11 @@ from app.workers.kafka_producer import send_event
 from app.utils.websocket_manager import manager
 from app.workers.worker_manager import worker_manager
 
+# ✅ NEW IMPORT (RUNTIME CONTROL)
+from app.utils.runtime_control import stop_scan as runtime_stop
+from app.utils.runtime_control import pause_scan as runtime_pause
+from app.utils.runtime_control import resume_scan as runtime_resume
+
 router = APIRouter()
 logger = logging.getLogger("ScanRoute")
 
@@ -37,21 +42,15 @@ def start_scan(payload: ScanRequest):
     db = SessionLocal()
 
     try:
-        # ============================================
-        # 0. ENSURE WORKERS ARE RUNNING
-        # ============================================
         worker_manager.ensure_workers_running()
 
-        # ============================================
-        # 1. CREATE SCAN JOB
-        # ============================================
         scan_job = ScanJob(
             organization_id="10024715-cd08-49a4-b316-4f394c14d267",
             scan_type="full",
             trigger="manual",
             status="running",
             started_at=datetime.utcnow(),
-            domain=domain  # ✅ ADD THIS
+            domain=domain
         )
 
         db.add(scan_job)
@@ -60,9 +59,6 @@ def start_scan(payload: ScanRequest):
 
         scan_id = str(scan_job.id)
 
-        # ============================================
-        # 2. CHECK IF DOMAIN ALREADY EXISTS
-        # ============================================
         existing = db.query(AssetRegistry).filter(
             AssetRegistry.asset_identifier == domain
         ).first()
@@ -81,9 +77,6 @@ def start_scan(payload: ScanRequest):
             db.add(asset)
             db.commit()
 
-        # ============================================
-        # 3. SEND EVENT TO KAFKA
-        # ============================================
         event = {
             "event_type": "scan_started",
             "domain": domain,
@@ -93,9 +86,6 @@ def start_scan(payload: ScanRequest):
 
         send_event("scan-events", event)
 
-        # ============================================
-        # 4. SEND REAL-TIME WS LOG
-        # ============================================
         logger.info(f"🔍 Scan started for {domain}")
 
         return {
@@ -115,7 +105,7 @@ def start_scan(payload: ScanRequest):
 
 
 # ============================================
-# SCAN STATUS (FIXED - USE scan_id)
+# SCAN STATUS
 # ============================================
 
 @router.get("/status/{scan_id}")
@@ -123,7 +113,6 @@ def scan_status(scan_id: str):
     db = SessionLocal()
 
     try:
-        # 🔥 GET SPECIFIC SCAN BY ID (NOT latest)
         scan = db.query(ScanJob).filter(
             ScanJob.id == scan_id
         ).first()
@@ -136,7 +125,7 @@ def scan_status(scan_id: str):
 
         return {
             "scan_id": str(scan.id),
-            "domain": scan.domain if hasattr(scan, "domain") else "unknown",
+            "domain": scan.domain or "unknown",
             "status": scan.status,
             "started_at": scan.started_at,
             "finished_at": scan.finished_at
@@ -147,7 +136,7 @@ def scan_status(scan_id: str):
 
 
 # ============================================
-# WEBSOCKET FOR REAL-TIME LOGS
+# WEBSOCKET
 # ============================================
 
 @router.websocket("/ws")
@@ -163,10 +152,9 @@ async def scan_websocket(websocket: WebSocket):
 
 
 # ============================================
-# 🔥 NEW APIs FOR FRONTEND CONTROL
+# GET ALL SCANS
 # ============================================
 
-# GET ALL SCANS
 @router.get("")
 def get_all_scans():
     db = SessionLocal()
@@ -177,17 +165,20 @@ def get_all_scans():
         return [
             {
                 "id": str(s.id),
-                "domain": s.domain or "unknown",  # ✅ FIXED
+                "domain": s.domain or "unknown",
                 "status": s.status
             }
             for s in scans
         ]
 
-    finally:    
+    finally:
         db.close()
 
 
+# ============================================
 # PAUSE SCAN
+# ============================================
+
 @router.post("/{scan_id}/pause")
 def pause_scan(scan_id: str):
     db = SessionLocal()
@@ -198,16 +189,27 @@ def pause_scan(scan_id: str):
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
 
+        if scan.status in ["stopped", "completed"]:
+            return {"message": f"Cannot pause scan in '{scan.status}' state"}
+
         scan.status = "paused"
         db.commit()
 
-        return {"message": "Scan paused"}
+        # ✅ INSTANT PAUSE (IMPORTANT)
+        runtime_pause(scan_id)
+
+        logger.info(f"⏸ Scan paused → {scan_id}")
+
+        return {"message": "Scan paused instantly"}
 
     finally:
         db.close()
 
 
+# ============================================
 # RESUME SCAN
+# ============================================
+
 @router.post("/{scan_id}/resume")
 def resume_scan(scan_id: str):
     db = SessionLocal()
@@ -218,8 +220,19 @@ def resume_scan(scan_id: str):
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
 
+        if scan.status == "completed":
+            return {"message": "Cannot resume completed scan"}
+
+        if scan.status == "running":
+            return {"message": "Scan already running"}
+
         scan.status = "running"
         db.commit()
+
+        # ✅ CLEAR FLAGS (VERY IMPORTANT)
+        runtime_resume(scan_id)
+
+        logger.info(f"▶ Scan resumed → {scan_id}")
 
         return {"message": "Scan resumed"}
 
@@ -227,7 +240,10 @@ def resume_scan(scan_id: str):
         db.close()
 
 
+# ============================================
 # STOP SCAN
+# ============================================
+
 @router.post("/{scan_id}/stop")
 def stop_scan(scan_id: str):
     db = SessionLocal()
@@ -238,18 +254,29 @@ def stop_scan(scan_id: str):
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
 
+        if scan.status == "stopped":
+            return {"message": "Scan already stopped"}
+
         scan.status = "stopped"
         scan.finished_at = datetime.utcnow()
 
         db.commit()
 
-        return {"message": "Scan stopped"}
+        # ✅ INSTANT STOP (CRITICAL FIX)
+        runtime_stop(scan_id)
+
+        logger.info(f"⛔ Scan stopped → {scan_id}")
+
+        return {"message": "Scan stopped instantly"}
 
     finally:
         db.close()
 
 
+# ============================================
 # DELETE SCAN
+# ============================================
+
 @router.delete("/{scan_id}")
 def delete_scan(scan_id: str):
     db = SessionLocal()
@@ -262,6 +289,8 @@ def delete_scan(scan_id: str):
 
         db.delete(scan)
         db.commit()
+
+        logger.info(f"🗑 Scan deleted → {scan_id}")
 
         return {"message": "Scan deleted"}
 

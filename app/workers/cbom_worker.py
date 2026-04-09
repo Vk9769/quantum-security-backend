@@ -1,7 +1,6 @@
-import logging
 import json
+import logging
 import time
-import asyncio
 
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
@@ -16,6 +15,12 @@ from app.models.certificate import Certificate
 from app.workers.kafka_producer import send_event
 
 from app.utils.log_streamer import setup_logger
+
+# ✅ CONTROL
+from app.utils.scan_control import check_scan_control
+
+# ✅ CHECKPOINT
+from app.utils.checkpoint import save_checkpoint, get_checkpoint
 
 
 # -------------------- LOGGER SETUP --------------------
@@ -51,27 +56,79 @@ def send_log(message: str, scan_id: str = None):
 # -------------------- MAIN LOOP --------------------
 for message in consumer:
 
-    print("KAFKA MESSAGE RECEIVED:", message.value)
-
     event = message.value
+    print("KAFKA MESSAGE RECEIVED:", event)
+
     event_type = event.get("event_type")
     scan_id = event.get("scan_id")
-    
-    if not scan_id:
-      logger.warning("No scan_id in CBOM event")
 
-    # ✅ ONLY PROCESS ON CERTIFICATE (FINAL STAGE)
+    # =====================================================
+    # 🔥 GLOBAL SCAN CONTROL (HARD BLOCK)
+    # =====================================================
+    status = check_scan_control(scan_id)
+
+    if status == "paused":
+        time.sleep(2)
+        continue
+
+    if status == "stopped":
+        logger.info(f"⛔ Scan stopped → {scan_id}")
+        continue
+
+    if not scan_id:
+        logger.warning("No scan_id in CBOM event")
+
+    # ---------------- CHECKPOINT LOAD ----------------
+    checkpoint = get_checkpoint(scan_id)
+    last_asset = checkpoint.get("last_asset") if checkpoint else None
+
+    # ---------------- FILTER EVENTS ----------------
     if event_type != "certificate_discovered":
         continue
-    
+
     asset = event.get("asset")
 
     if not asset:
         continue
 
+    # ---------------- RESUME LOGIC ----------------
+    skip = True if last_asset else False
+
+    if skip:
+        if asset == last_asset:
+            skip = False
+        else:
+            continue
+
     db: Session = SessionLocal()
 
     try:
+
+        # =====================================================
+        # 🔥 CONTROL BEFORE PROCESS START
+        # =====================================================
+        while True:
+            status = check_scan_control(scan_id)
+
+            if status == "stopped":
+                logger.info(f"⛔ Stopped before processing → {asset}")
+                break
+
+            if status == "paused":
+                time.sleep(2)
+                continue
+
+            break
+
+        if status == "stopped":
+            continue
+
+        # 🔥 SAVE CHECKPOINT
+        save_checkpoint(
+            scan_id=scan_id,
+            stage="cbom_processing",
+            last_asset=asset
+        )
 
         logger.info(f"🔐 Processing CBOM → {asset}")
         send_log(f"📦 Processing CBOM → {asset}", scan_id)
@@ -82,6 +139,17 @@ for message in consumer:
         asset_record = None
 
         for _ in range(3):
+
+            status = check_scan_control(scan_id)
+
+            if status == "paused":
+                time.sleep(2)
+                continue
+
+            if status == "stopped":
+                logger.info(f"⛔ Stopped during asset fetch → {asset}")
+                break
+
             asset_record = db.query(AssetRegistry).filter(
                 AssetRegistry.asset_identifier == asset
             ).first()
@@ -91,6 +159,9 @@ for message in consumer:
 
             logger.warning(f"Asset not found → {asset}, retrying...")
             time.sleep(1)
+
+        if status == "stopped":
+            continue
 
         if not asset_record:
             logger.warning(f"Asset still missing → {asset}")
@@ -128,14 +199,30 @@ for message in consumer:
             "expiry": cert.expiry_date.isoformat() if cert and cert.expiry_date else event.get("expiry")
         }
 
+        # =====================================================
+        # 🔥 CONTROL BEFORE HEAVY TASK
+        # =====================================================
+        status = check_scan_control(scan_id)
+
+        if status == "stopped":
+            logger.info(f"⛔ Stopped before CBOM generation → {asset}")
+            continue
+
         # --------------------------------
-        # Generate CBOM
+        # Generate CBOM (HEAVY)
         # --------------------------------
         cbom_data = generate_cbom(
             asset,
             tls=tls_data,
             cert=cert_data
         )
+
+        # 🔥 CHECK AFTER HEAVY TASK
+        status = check_scan_control(scan_id)
+
+        if status == "stopped":
+            logger.info(f"⛔ Stopped after CBOM generation → {asset}")
+            continue
 
         logger.info(f"⚙️ CBOM generated → {asset}")
         send_log(f"📦 CBOM generated → {asset}", scan_id)

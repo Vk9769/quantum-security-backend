@@ -1,13 +1,16 @@
 import json
 import logging
+import time
 
 from kafka import KafkaConsumer
 from app.services.graph_service import GraphService
-from app.workers.kafka_producer import send_event  # 🔥 IMPORTANT
+from app.workers.kafka_producer import send_event
 
-# ✅ NEW IMPORTS (added)
-from app.db.postgres import SessionLocal
-from app.models.scan_jobs import ScanJob
+# ✅ SCAN CONTROL
+from app.utils.scan_control import check_scan_control
+
+# ✅ CHECKPOINT IMPORT
+from app.utils.checkpoint import save_checkpoint, get_checkpoint
 
 
 # -------------------- INIT --------------------
@@ -21,7 +24,6 @@ logging.basicConfig(
 )
 
 logging.getLogger("kafka").setLevel(logging.WARNING)
-
 logger = logging.getLogger("ScanWorker")
 
 
@@ -54,7 +56,6 @@ def extract_domain(hostname):
     return hostname
 
 
-# 🔥 SEND LOG TO UI VIA KAFKA (IMPORTANT)
 def send_log(message: str, scan_id=None):
     send_event("scan-logs", {
         "type": "log",
@@ -63,51 +64,40 @@ def send_log(message: str, scan_id=None):
     })
 
 
-# ✅ NEW FUNCTION (SCAN CONTROL)
-def is_scan_active(scan_id):
-    if not scan_id:
-        return True
-
-    db = SessionLocal()
-
-    try:
-        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
-
-        if not scan:
-            return False
-
-        if scan.status == "paused":
-            return "paused"
-
-        if scan.status == "stopped":
-            return False
-
-        return True
-
-    finally:
-        db.close()
-
-
 # -------------------- MAIN LOOP --------------------
 
 for message in consumer:
-
     try:
-
         event = message.value
         event_type = event.get("event_type")
-
-        # ✅ NEW CONTROL LOGIC
         scan_id = event.get("scan_id")
-        status = is_scan_active(scan_id)
 
-        if status == "paused":
-            logger.info(f"⏸ Scan paused → {scan_id}")
-            continue
+        # ==================================================
+        # 🔥 GLOBAL CONTROL LOOP (STRONG FIX)
+        # ==================================================
+        while True:
+            status = check_scan_control(scan_id)
 
-        if status is False:
-            logger.info(f"⛔ Scan stopped → {scan_id}")
-            continue
+            if status == "paused":
+                logger.info(f"⏸ Scan paused → {scan_id}")
+                time.sleep(2)
+                continue
+
+            if status == "stopped":
+                logger.info(f"⛔ Hard stop → {scan_id}")
+                break
+
+            break
+
+        if status == "stopped":
+            continue  # ❗ skip entire event immediately
+
+        # ==================================================
+        # CHECKPOINT LOAD
+        # ==================================================
+        checkpoint = get_checkpoint(scan_id) or {}
+        last_stage = checkpoint.get("stage")
+        last_asset = checkpoint.get("last_asset")
 
         logger.info(f"📩 Event received → {event_type}")
 
@@ -116,6 +106,8 @@ for message in consumer:
         # ============================================
         if event_type == "scan_started":
 
+            save_checkpoint(scan_id, "scan_started")
+
             domain = event["domain"]
 
             logger.info(f"🔍 Scan started for {domain}")
@@ -123,14 +115,26 @@ for message in consumer:
 
             graph.create_domain(domain)
 
-
         # ============================================
         # ASSET DISCOVERY
         # ============================================
         elif event_type == "asset_discovered":
 
+            # 🔥 RESUME SAFETY
+            if last_stage == "asset_discovered" and last_asset:
+                if event["asset"] != last_asset:
+                    continue
+                else:
+                    last_asset = None
+
             asset = event["asset"]
             domain = event.get("domain") or extract_domain(asset)
+
+            save_checkpoint(
+                scan_id,
+                stage="asset_discovered",
+                last_asset=asset
+            )
 
             logger.info(f"🌐 Asset discovered → {asset}")
             send_log(f"🌐 Asset discovered → {asset}", scan_id)
@@ -138,27 +142,57 @@ for message in consumer:
             graph.create_domain(domain)
             graph.create_asset(domain, asset)
 
+        # ============================================
+        # PORT SCAN TRIGGER
+        # ============================================
+        elif event_type == "port_scan_requested":
+
+            domain = event.get("domain")
+
+            logger.info(f"🚀 Port scan requested → {domain}")
+            send_log(f"🚀 Starting port scan → {domain}", scan_id)
 
         # ============================================
-        # PORT SCAN
+        # PORT OPEN
         # ============================================
         elif event_type == "port_open":
 
             asset = event["asset"]
             port = event["port"]
 
+            # 🔥 MID-CHECK (IMPORTANT)
+            if check_scan_control(scan_id) == "stopped":
+                logger.info(f"⛔ Stopped before processing port → {scan_id}")
+                continue
+
+            save_checkpoint(
+                scan_id,
+                stage="port_open",
+                last_asset=asset,
+                meta={"port": port}
+            )
+
             logger.info(f"🔓 Open port → {asset}:{port}")
             send_log(f"🔓 Port open → {asset}:{port}", scan_id)
 
             graph.add_port(asset, port)
 
-
         # ============================================
-        # TLS SCAN
+        # TLS
         # ============================================
         elif event_type == "tls_scan_result":
 
             asset = event["asset"]
+
+            if check_scan_control(scan_id) == "stopped":
+                logger.info(f"⛔ Stopped before TLS → {scan_id}")
+                continue
+
+            save_checkpoint(
+                scan_id,
+                stage="tls_scan",
+                last_asset=asset
+            )
 
             logger.info(
                 f"🔐 TLS → {asset} {event['tls_version']} {event['cipher_suite']}"
@@ -175,13 +209,22 @@ for message in consumer:
                 event["cipher_suite"]
             )
 
-
         # ============================================
         # CERTIFICATE
         # ============================================
         elif event_type == "certificate_discovered":
 
             asset = event["asset"]
+
+            if check_scan_control(scan_id) == "stopped":
+                logger.info(f"⛔ Stopped before certificate → {scan_id}")
+                continue
+
+            save_checkpoint(
+                scan_id,
+                stage="certificate",
+                last_asset=asset
+            )
 
             logger.info(
                 f"📜 Certificate → {asset} Issuer={event['issuer']}"
@@ -201,7 +244,6 @@ for message in consumer:
                 event["key_size"]
             )
 
-
         # ============================================
         # CBOM
         # ============================================
@@ -209,14 +251,21 @@ for message in consumer:
 
             asset = event["asset"]
 
+            if check_scan_control(scan_id) == "stopped":
+                logger.info(f"⛔ Stopped before CBOM → {scan_id}")
+                continue
+
+            save_checkpoint(
+                scan_id,
+                stage="cbom",
+                last_asset=asset
+            )
+
             logger.info(
                 f"🧾 CBOM → {asset} Algo={event['signature_algorithm']}"
             )
 
-            send_log(
-                f"🧾 CBOM → {asset}",
-                scan_id
-            )
+            send_log(f"🧾 CBOM → {asset}", scan_id)
 
             graph.add_cbom(
                 asset,
@@ -225,17 +274,19 @@ for message in consumer:
                 event.get("expiry")
             )
 
+        # ============================================
+        # IGNORE OLD EVENT
+        # ============================================
+        elif event_type == "start_port_scan":
+            continue
 
         # ============================================
-        # UNKNOWN EVENT
+        # UNKNOWN
         # ============================================
         else:
             logger.warning(f"⚠️ Unknown event type: {event_type}")
-            send_log(f"⚠️ Unknown event: {event_type}", scan_id)
-
 
     except Exception as e:
-
         logger.error("❌ Scan worker crashed")
         logger.error(e)
 

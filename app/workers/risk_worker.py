@@ -13,6 +13,12 @@ from app.workers.kafka_producer import send_alert, send_event
 from app.db.postgres import SessionLocal
 from app.models.asset_registry import AssetRegistry
 
+# ✅ SCAN CONTROL
+from app.utils.scan_control import check_scan_control
+
+# ✅ CHECKPOINT IMPORT
+from app.utils.checkpoint import save_checkpoint, get_checkpoint
+
 from app.services.pqc_service import (
     update_cbom_quantum_risk,
     store_pqc_analysis
@@ -45,6 +51,15 @@ def normalize_asset(asset: str) -> str:
 
 def get_asset_record_with_retry(db: Session, asset: str, retries: int = 2, delay: int = 2):
     for attempt in range(retries + 1):
+
+        # 🔥 CONTROL INSIDE RETRY LOOP
+        status = check_scan_control(current_scan_id)
+        if status == "stopped":
+            return None
+        if status == "paused":
+            time.sleep(2)
+            continue
+
         asset_record = db.query(AssetRegistry).filter(
             AssetRegistry.asset_identifier == asset
         ).first()
@@ -136,6 +151,28 @@ for message in consumer:
     event_type = event.get("event_type")
     scan_id = event.get("scan_id")
 
+    # 🔥 GLOBAL VARIABLE FOR HELPER ACCESS
+    current_scan_id = scan_id
+
+    # =====================================================
+    # 🔥 GLOBAL SCAN CONTROL (HARD BLOCK)
+    # =====================================================
+    status = check_scan_control(scan_id)
+
+    if status == "paused":
+        time.sleep(2)
+        continue
+
+    if status == "stopped":
+        logger.info(f"⛔ Scan stopped → {scan_id}")
+        continue
+
+    # =====================================================
+    checkpoint = get_checkpoint(scan_id)
+
+    if checkpoint and checkpoint.get("stage") not in [None, "risk_analysis"]:
+        continue
+
     db: Session = SessionLocal()
 
     try:
@@ -146,11 +183,23 @@ for message in consumer:
         # 1️⃣ VULNERABILITY EVENTS
         # ============================================
         if event_type == "vulnerability_detected":
+
+            # 🔥 CONTROL CHECK BEFORE PROCESS
+            if check_scan_control(scan_id) == "stopped":
+                continue
+
             asset = normalize_asset(event.get("asset"))
             cve = event.get("cve") or "UNKNOWN"
 
             if not asset:
                 continue
+
+            if checkpoint:
+                last_asset = checkpoint.get("last_asset")
+                if last_asset and asset != last_asset:
+                    continue
+
+            save_checkpoint(scan_id, "risk_analysis", last_asset=asset)
 
             graph.create_asset("unknown", asset)
             graph.add_vulnerability(asset, cve)
@@ -174,8 +223,6 @@ for message in consumer:
             asset_record = get_asset_record_with_retry(db, asset)
 
             if not asset_record:
-                logger.warning(f"Asset missing → {asset}")
-                send_log(f"⚠ Asset not found for vulnerability → {asset}", scan_id)
                 continue
 
             store_asset_risk(db, asset_record.id, risk_score)
@@ -184,14 +231,33 @@ for message in consumer:
         # 2️⃣ CBOM / QUANTUM EVENTS
         # ============================================
         elif event_type == "cbom_generated":
+
+            # 🔥 CONTROL CHECK BEFORE HEAVY AI
+            status = check_scan_control(scan_id)
+            if status == "stopped":
+                continue
+            if status == "paused":
+                time.sleep(2)
+                continue
+
             asset = normalize_asset(event.get("asset"))
 
             if not asset:
                 continue
 
+            if checkpoint:
+                last_asset = checkpoint.get("last_asset")
+                if last_asset and asset != last_asset:
+                    continue
+
+            save_checkpoint(scan_id, "risk_analysis", last_asset=asset)
+
             graph.create_asset("unknown", asset)
 
-            # -------- Quantum Risk --------
+            # 🔥 CHECK BEFORE AI CALL
+            if check_scan_control(scan_id) == "stopped":
+                continue
+
             quantum_risk = analyze_quantum_risk(event)
 
             logger.info(
@@ -200,13 +266,15 @@ for message in consumer:
             )
             send_log(f"⚛ Quantum risk → {asset} ({quantum_risk})", scan_id)
 
-            # -------- Risk Score --------
             risk_score = get_quantum_risk_score(quantum_risk)
 
             logger.info(f"📊 Risk Score → {asset} = {risk_score}")
             send_log(f"📊 Risk score → {asset}: {risk_score}", scan_id)
 
-            # -------- AI SOC --------
+            # 🔥 CHECK BEFORE AI SOC
+            if check_scan_control(scan_id) == "stopped":
+                continue
+
             try:
                 ai_result = ai_soc.analyze(event) or {}
                 attack_simulation = ai_result.get("attack_simulation", [])
@@ -225,7 +293,6 @@ for message in consumer:
                 recommendations = []
                 attack_paths = []
 
-            # -------- ALERT --------
             if quantum_risk in ["NOT_QUANTUM_SAFE", "CRITICAL"]:
                 send_alert(
                     asset,
@@ -234,15 +301,11 @@ for message in consumer:
                     scan_id
                 )
 
-            # -------- GRAPH --------
             graph.add_risk(asset, risk_score, quantum_risk)
 
-            # -------- DATABASE --------
             asset_record = get_asset_record_with_retry(db, asset)
 
             if not asset_record:
-                logger.warning(f"Asset missing → {asset}")
-                send_log(f"⚠ Asset not found for CBOM → {asset}", scan_id)
                 continue
 
             algorithm = (
@@ -258,7 +321,6 @@ for message in consumer:
             update_cbom_quantum_risk(db, asset_record.id, quantum_risk)
             store_asset_risk(db, asset_record.id, risk_score)
 
-            # -------- SEND AI EVENT --------
             send_event("ai-security-events", {
                 "scan_id": scan_id,
                 "event_type": "ai_security_analysis",
