@@ -13,6 +13,7 @@ from app.models.tls import TLSScanResult
 from app.models.cbom import CBOMInventory
 from app.models.pqc import PQCAnalysis
 from app.models.scan import PortScanResult
+from app.models.scan import ScanSnapshot
 
 logger = logging.getLogger("AssetService")
 
@@ -411,89 +412,143 @@ def _build_ip_asset_row(db: Session, asset: AssetRegistry) -> dict:
     }
 
 
-def get_assets_visibility(db: Session, asset_type: str = "all") -> List[dict]:
-    asset_type = (asset_type or "all").strip().lower()
-    result = []
+def get_assets_visibility(
+    db: Session,
+    asset_type: str = "all",
+    scan_id: str = None
+) -> List[dict]:
 
-    # -----------------------------
-    # DOMAIN ROWS
-    # -----------------------------
-    if asset_type in ["all", "domain"]:
-        domain_rows = db.query(Domain).order_by(Domain.domain_name.asc()).all()
-        for domain in domain_rows:
-            result.append(_build_domain_asset_row(db, domain))
-
-    # -----------------------------
-    # SUBDOMAIN ROWS
-    # -----------------------------
-    if asset_type in ["all", "subdomain", "ssl", "software"]:
-        subdomain_rows = (
-            db.query(Subdomain, Domain)
-            .join(Domain, Subdomain.domain_id == Domain.id)
-            .order_by(Subdomain.subdomain.asc())
-            .all()
-        )
-
-        sub_rows = []
-        for sub, domain in subdomain_rows:
-            row = _build_subdomain_asset_row(db, sub, domain)
-            sub_rows.append(row)
-
-        if asset_type == "ssl":
-            sub_rows = [row for row in sub_rows if row["tls"] != "-"]
-
-        elif asset_type == "software":
-            # No software table yet, so return empty
-            sub_rows = []
-
-        result.extend(sub_rows)
-
-    # -----------------------------
-    # IP ROWS
-    # Only in IP tab, not in ALL tab
-    # -----------------------------
-    if asset_type == "ip":
-        ip_assets = (
-            db.query(AssetRegistry)
-            .filter(AssetRegistry.asset_type == "ip")
-            .order_by(AssetRegistry.asset_identifier.asc())
-            .all()
-        )
-
-        for asset in ip_assets:
-            result.append(_build_ip_asset_row(db, asset))
-
-    return result
-
-
-def get_assets_counts(db: Session) -> dict:
     try:
-        domain_count = db.query(Domain).count()
-        subdomain_count = db.query(Subdomain).count()
+        if not scan_id:
+            return []
 
-        # SAFE TLS query
-        try:
-            ssl_asset_ids = {
-                str(row.asset_id)
-                for row in db.query(TLSScanResult.asset_id).distinct().all()
-                if row.asset_id is not None
+        # ✅ Step 1: Get scan
+        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if not scan or not scan.domain:
+            return []
+
+        # ✅ Step 2: Get domain
+        domain = db.query(Domain).filter(
+            Domain.domain_name == scan.domain
+        ).first()
+
+        if not domain:
+            return []
+
+        # ✅ Step 3: Get subdomains
+        subdomains = db.query(Subdomain).filter(
+            Subdomain.domain_id == domain.id
+        ).all()
+
+        result = []
+
+        for sub in subdomains:
+
+            sub_asset = _get_asset_registry_row(
+                db=db,
+                asset_identifier=sub.subdomain,
+                asset_type="subdomain"
+            )
+
+            port_value = "-"
+            tls_value = "-"
+            pqc_value = "Upgrade"
+
+            if sub_asset:
+                port_row = _get_latest_port_for_asset(db, sub_asset.id)
+                tls_row = _get_tls_for_asset(db, sub_asset.id)
+                cbom_row = _get_cbom_for_asset(db, sub_asset.id)
+                pqc_row = _get_pqc_for_asset(db, sub_asset.id)
+
+                port_value = str(port_row.port) if port_row and port_row.port else "-"
+                tls_value = tls_row.tls_version if tls_row and tls_row.tls_version else "-"
+                pqc_value = _resolve_pqc_status(pqc_row, cbom_row)
+
+                asset_id = str(sub_asset.id)
+            else:
+                asset_id = str(sub.id)
+
+            row = {
+                "id": asset_id,
+                "name": sub.subdomain,
+                "type": "subdomain",
+                "domain": domain.domain_name,
+                "ip": _safe_str(sub.ip_address, "-"),
+                "port": port_value,
+                "tls": tls_value,
+                "pqc": pqc_value
             }
-        except Exception:
-            ssl_asset_ids = set()
 
-        # SAFE IP count
-        try:
-            ip_count = db.query(AssetRegistry).filter(
-                AssetRegistry.asset_type == "ip"
-            ).count()
-        except Exception:
-            ip_count = 0
+            result.append(row)
+
+        # ✅ FILTER BY TAB
+        if asset_type == "ssl":
+            result = [r for r in result if r["tls"] != "-"]
+
+        if asset_type == "ip":
+            result = [r for r in result if r["ip"] != "-"]
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in get_assets_visibility: {e}")
+        return []
+
+
+def get_assets_counts(db: Session, scan_id: str) -> dict:
+    try:
+        if not scan_id:
+            return defaultCounts
+
+        # ✅ Step 1: Get scan
+        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if not scan or not scan.domain:
+            return defaultCounts
+
+        # ✅ Step 2: Get domain
+        domain = db.query(Domain).filter(
+            Domain.domain_name == scan.domain
+        ).first()
+
+        if not domain:
+            return defaultCounts
+
+        # ✅ Step 3: Get subdomains
+        subdomains = db.query(Subdomain).filter(
+            Subdomain.domain_id == domain.id
+        ).all()
+
+        sub_list = [s.subdomain for s in subdomains]
+
+        # ✅ Count
+        total = len(sub_list)
+
+        ssl_count = 0
+        ip_count = 0
+
+        for sub in subdomains:
+            sub_asset = _get_asset_registry_row(
+                db=db,
+                asset_identifier=sub.subdomain,
+                asset_type="subdomain"
+            )
+
+            if not sub_asset:
+                continue
+
+            tls_row = _get_tls_for_asset(db, sub_asset.id)
+
+            if tls_row and tls_row.tls_version:
+                ssl_count += 1
+
+            if sub.ip_address:
+                ip_count += 1
 
         return {
-            "all": domain_count + subdomain_count,
-            "domain": domain_count,
-            "subdomain": subdomain_count,
-            "ssl": len(ssl_asset_ids),
+            "all": total,
+            "domain": 1,
+            "subdomain": total,
+            "ssl": ssl_count,
             "ip": ip_count,
             "software": 0
         }
@@ -510,10 +565,37 @@ def get_assets_counts(db: Session) -> dict:
         }
 
 
-def get_assets_summary_data(db: Session) -> List[dict]:
+from app.models.scan_jobs import ScanJob
+from app.models.asset import Domain, Subdomain
+
+def get_assets_summary_data(db: Session, scan_id: str) -> List[dict]:
     try:
-        counts = get_assets_counts(db)
-        total_assets = counts.get("all", 0)
+        # ✅ Step 1: Get scan
+        scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+
+        if not scan or not scan.domain:
+            return []
+
+        # ✅ Step 2: Get domain
+        domain = db.query(Domain).filter(
+            Domain.domain_name == scan.domain
+        ).first()
+
+        if not domain:
+            return []
+
+        # ✅ Step 3: Get subdomains
+        subdomains = db.query(Subdomain.subdomain).filter(
+            Subdomain.domain_id == domain.id
+        ).all()
+
+        sub_list = [s[0] for s in subdomains]
+
+        # ✅ Step 4: Count assets
+        total_assets = db.query(AssetRegistry).filter(
+            AssetRegistry.asset_type == "subdomain",
+            AssetRegistry.asset_identifier.in_(sub_list)
+        ).count()
 
         return [
             {
@@ -545,6 +627,7 @@ def get_assets_summary_data(db: Session) -> List[dict]:
                 "positive": False
             }
         ]
+
     except Exception as e:
         logger.error(f"Error in get_assets_summary_data: {e}")
         return []

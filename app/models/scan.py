@@ -24,3 +24,25 @@ class PortScanResult(Base):
     state = Column(String)
 
     scan_time = Column(DateTime)
+
+
+# ✅ ADDED THIS CLASS (no changes above)
+class ScanSnapshot(Base):
+
+    __tablename__ = "scan_snapshots"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    scan_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("scan_jobs.id"),
+        nullable=False
+    )
+
+    asset_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("asset_registry.id"),
+        nullable=False
+    )
+
+    snapshot_time = Column(DateTime)
