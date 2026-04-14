@@ -28,6 +28,7 @@ logger = logging.getLogger("ScanWorker")
 
 
 # -------------------- KAFKA CONSUMER --------------------
+# ✅ fingerprint-events REMOVED
 
 consumer = KafkaConsumer(
     "scan-events",

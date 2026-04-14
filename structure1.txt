@@ -26,6 +26,7 @@ C:\QUANTUM-SECURITY-BACKEND\APP
 |   |   |   
 |   |           
 |   +---models
+|   |   |   ai_agent_result.py
 |   |   |   anomaly_model.py
 |   |   |   risk_predictor.py
 |   |   |   
@@ -82,7 +83,6 @@ C:\QUANTUM-SECURITY-BACKEND\APP
 +---models
 |   |   alert.py
 |   |   asset.py
-|   |   asset_fingerprint.py
 |   |   asset_registry.py
 |   |   cbom.py
 |   |   certificate.py
@@ -109,8 +109,6 @@ C:\QUANTUM-SECURITY-BACKEND\APP
 |   |   certificate_scanner.py
 |   |   ct_monitor.py
 |   |   dns_scanner.py
-|   |   http_fingerprint.py
-|   |   infra_fingerprint.py
 |   |   port_scanner.py
 |   |   reverse_dns_scanner.py
 |   |   service_detector.py
@@ -133,8 +131,8 @@ C:\QUANTUM-SECURITY-BACKEND\APP
 |   |   
 |           
 +---services
+|   |   ai_agent_service.py
 |   |   alert_service.py
-|   |   asset_fingerprint_service.py
 |   |   asset_service.py
 |   |   clickhouse_service.py
 |   |   graph_service.py
@@ -148,10 +146,12 @@ C:\QUANTUM-SECURITY-BACKEND\APP
 |   |   
 |           
 +---utils
+|   |   checkpoint.py
 |   |   crypto_utils.py
 |   |   email_utils.py
 |   |   logger.py
 |   |   log_streamer.py
+|   |   runtime_control.py
 |   |   scan_control.py
 |   |   security.py
 |   |   validators.py
@@ -162,7 +162,6 @@ C:\QUANTUM-SECURITY-BACKEND\APP
 |   |   alert_worker.py
 |   |   cbom_worker.py
 |   |   certificate_worker.py
-|   |   fingerprint_worker.py
 |   |   kafka_consumer.py
 |   |   kafka_producer.py
 |   |   log_consumer.py

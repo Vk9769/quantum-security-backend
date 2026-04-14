@@ -69,3 +69,21 @@ def check_scan_control(scan_id):
 
     finally:
         db.close()
+        
+def is_scan_active(scan_id):
+    """
+    Backward compatibility for old workers.
+    Returns:
+    - True  → running
+    - False → stopped
+    - "paused" → paused
+    """
+    status = check_scan_control(scan_id)
+
+    if status == "running":
+        return True
+
+    if status == "paused":
+        return "paused"
+
+    return False

@@ -53,12 +53,21 @@ async def send_topology_update(node, parent):
         logger.error(f"WS topology error: {e}")
 
 
+def run_async(coro):
+    try:
+        asyncio.run(coro)
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+        loop.create_task(coro)
+
+
 # -------------------- MAIN LOOP --------------------
 
 for message in consumer:
 
     try:
         event = message.value
+        event_type = event.get("event_type")   # ✅ FIX ADDED HERE
 
         logger.info(f"📩 Event received → {event}")
 
@@ -123,7 +132,6 @@ for message in consumer:
             print(log_msg)
 
 
-
         # ==============================
         # VULNERABILITY
         # ==============================
@@ -134,7 +142,6 @@ for message in consumer:
 
             log_msg = f"⚠️ Vulnerability → {asset} ({vuln})"
             print(log_msg)
-
 
 
         # ==============================
@@ -149,7 +156,7 @@ for message in consumer:
 
 
         # ==============================
-        # SCAN COMPLETED (IMPORTANT 🔥)
+        # SCAN COMPLETED
         # ==============================
         elif event_type == "scan_completed":
 

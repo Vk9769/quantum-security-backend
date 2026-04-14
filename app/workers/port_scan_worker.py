@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+import threading
 
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
@@ -12,10 +13,7 @@ from app.services.scan_service import store_port_scan_result
 from app.services.graph_service import GraphService
 from app.workers.kafka_producer import send_event
 
-# ✅ CONTROL
 from app.utils.scan_control import check_scan_control
-
-# ✅ CHECKPOINT
 from app.utils.checkpoint import save_checkpoint, get_checkpoint
 
 
@@ -30,13 +28,42 @@ logging.getLogger("kafka").setLevel(logging.WARNING)
 logger = logging.getLogger("PortScanWorker")
 
 
+# -------------------- GLOBAL CONTROL --------------------
+active_scans = set()
+lock = threading.Lock()
+
+MAX_THREADS = 5
+semaphore = threading.Semaphore(MAX_THREADS)
+
+
 # -------------------- HELPERS --------------------
-def send_log(message: str, scan_id: str = None):
+def send_log(message: str, scan_id: str = None, progress=None):
     send_event("scan-logs", {
         "type": "log",
         "message": message,
-        "scan_id": scan_id
+        "scan_id": scan_id,
+        "progress": progress
     })
+
+
+def send_progress(asset, scan_id, percent, current, total):
+    send_event("scan-logs", {
+        "type": "progress",
+        "scan_id": scan_id,
+        "asset": asset,
+        "progress_percent": percent,
+        "current": current,
+        "total": total
+    })
+
+
+def print_progress_bar(current, total, length=20):
+    if total == 0:
+        return "[░░░░░░░░░░░░░░░░░░░░] 0%"
+    percent = int((current / total) * 100)
+    filled = int(length * current // total)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[{bar}] {percent}% ({current}/{total})"
 
 
 def normalize_asset(value: str) -> str:
@@ -92,8 +119,16 @@ consumer = KafkaConsumer(
     "port-scan-events",
     bootstrap_servers="localhost:9092",
     auto_offset_reset="latest",
-    group_id="port-scan-worker",
+
+    group_id="port-scan-worker-v2",
+
     enable_auto_commit=True,
+
+    max_poll_interval_ms=600000,
+    session_timeout_ms=30000,
+    heartbeat_interval_ms=10000,
+
+    max_poll_records=1,
     value_deserializer=lambda m: json.loads(m.decode("utf-8"))
 )
 
@@ -101,7 +136,7 @@ logger.info("🚀 Port Scan Worker Started")
 print("Waiting for Kafka messages...")
 
 
-# -------------------- CONTROL HELPER --------------------
+# -------------------- CONTROL --------------------
 def wait_if_paused(scan_id):
     while True:
         status = check_scan_control(scan_id)
@@ -116,6 +151,106 @@ def wait_if_paused(scan_id):
         return "running"
 
 
+# -------------------- 🔥 THREAD SCAN FUNCTION --------------------
+def run_port_scan(asset, scan_id, organization_id):
+    key = f"{asset}:{scan_id}"
+
+    with semaphore:
+        db = SessionLocal()
+
+        try:
+            send_log(f"🔍 Scanning ports → {asset}", scan_id)
+
+            ports = []
+            try:
+                for port in scan_ports(asset):
+                    status = wait_if_paused(scan_id)
+                    if status == "stopped":
+                        return
+                    ports.append(port)
+
+            except Exception:
+                send_log(f"❌ Port scan failed → {asset}", scan_id)
+                return
+
+            total = len(ports)
+            open_count = 0
+
+            for i, port in enumerate(ports, start=1):
+
+                status = wait_if_paused(scan_id)
+                if status == "stopped":
+                    break
+
+                percent = int((i / total) * 100) if total else 0
+
+                progress_bar = print_progress_bar(i, total)
+                logger.info(f"{asset} {progress_bar}")
+
+                send_progress(asset, scan_id, percent, i, total)
+
+                save_checkpoint(
+                    scan_id,
+                    stage="port_scan",
+                    last_asset=asset,
+                    meta={"port": port}
+                )
+
+                try:
+                    store_port_scan_result(db, asset, port)
+                    graph.add_port(asset, port)
+
+                    open_count += 1
+
+                    send_event("port-scan-events", {
+                        "scan_id": scan_id,
+                        "organization_id": organization_id,
+                        "event_type": "port_open",
+                        "asset": asset,
+                        "port": port
+                    })
+
+                    send_log(f"🔓 Open port → {asset}:{port}", scan_id, percent)
+
+                except Exception as e:
+                    logger.error(e)
+
+            send_log(
+                f"✅ Port scan completed → {asset} | Open Ports: {open_count}/{total}",
+                scan_id,
+                100
+            )
+
+            # ✅ FIX: Trigger TLS ONLY if port 443 exists
+            if 443 in ports:
+                send_event("tls-events", {
+                    "event_type": "tls_scan_requested",
+                    "scan_id": scan_id,
+                    "organization_id": organization_id,
+                    "asset": asset
+                })
+                logger.info(f"🚀 TLS scan triggered → {asset}")
+            else:
+                logger.warning(f"⚠ Skipping TLS → No HTTPS port → {asset}")
+
+            # OPTIONAL (unchanged)
+            send_event("service-events", {
+                "event_type": "service_scan_requested",
+                "scan_id": scan_id,
+                "organization_id": organization_id,
+                "asset": asset,
+                "ports": ports
+            })
+
+            logger.info(f"🚀 Service detection triggered → {asset}")
+
+        finally:
+            db.close()
+
+            with lock:
+                active_scans.discard(key)
+
+
 # -------------------- MAIN LOOP --------------------
 for message in consumer:
     event = message.value
@@ -123,24 +258,17 @@ for message in consumer:
 
     scan_id = event.get("scan_id")
 
-    # 🔥 GLOBAL CONTROL (INSTANT)
     status = wait_if_paused(scan_id)
-
     if status == "stopped":
-        logger.info(f"⛔ Hard stop → {scan_id}")
         continue
 
     event_type = event.get("event_type")
 
-    # =====================================================
-    # 🔥 DOMAIN LEVEL TRIGGER
-    # =====================================================
     if event_type == "port_scan_requested":
 
         domain = normalize_asset(event.get("domain"))
         organization_id = event.get("organization_id")
 
-        logger.info(f"🚀 Starting full port scan → {domain}")
         send_log(f"🚀 Starting port scan → {domain}", scan_id)
 
         db = SessionLocal()
@@ -152,211 +280,40 @@ for message in consumer:
         finally:
             db.close()
 
-        if not assets:
-            logger.warning(f"⚠ No assets found for domain → {domain}")
-            send_log(f"⚠ No assets found for port scan → {domain}", scan_id)
-            continue
-
         for a in assets:
-
-            status = wait_if_paused(scan_id)
-            if status == "stopped":
-                break
-
             asset = normalize_asset(a.asset_identifier)
-
-            if not asset:
-                continue
-
-            checkpoint = get_checkpoint(scan_id)
-            resume_asset = checkpoint.get("last_asset") if checkpoint else None
-
-            if resume_asset and asset != resume_asset:
-                continue
-
             key = f"{asset}:{scan_id}"
 
-            if key in scanned_assets:
-                continue
-
-            scanned_assets.add(key)
-
-            send_log(f"🔍 Preparing port scan → {asset}", scan_id)
-
-            db = SessionLocal()
-
-            try:
-                asset_record = ensure_asset_exists(db, asset, organization_id)
-
-                if not asset_record:
+            with lock:
+                if key in active_scans:
+                    logger.warning(f"⚠ Duplicate scan skipped → {key}")
                     continue
+                active_scans.add(key)
 
-                send_log(f"🔍 Scanning ports → {asset}", scan_id)
-
-                # 🔥 CRITICAL FIX: INTERRUPTIBLE PORT SCAN
-                ports = []
-                try:
-                    for port in scan_ports(asset):
-
-                        status = wait_if_paused(scan_id)
-                        if status == "stopped":
-                            logger.info(f"⛔ Stopped during port scan → {asset}")
-                            break
-
-                        ports.append(port)
-
-                except Exception:
-                    send_log(f"❌ Port scan failed → {asset}", scan_id)
-                    continue
-
-                for port in ports:
-
-                    status = wait_if_paused(scan_id)
-                    if status == "stopped":
-                        break
-
-                    checkpoint = get_checkpoint(scan_id)
-                    resume_port = checkpoint.get("meta", {}).get("port") if checkpoint else None
-
-                    if resume_port and port != resume_port:
-                        continue
-
-                    save_checkpoint(
-                        scan_id,
-                        stage="port_scan",
-                        last_asset=asset,
-                        meta={"port": port}
-                    )
-
-                    try:
-                        store_port_scan_result(db, asset, port)
-                        graph.add_port(asset, port)
-
-                        send_event("port-scan-events", {
-                            "scan_id": scan_id,
-                            "organization_id": organization_id,
-                            "event_type": "port_open",
-                            "asset": asset,
-                            "port": port
-                        })
-
-                        send_log(f"🔓 Open port → {asset}:{port}", scan_id)
-
-                    except Exception as e:
-                        logger.error(e)
-
-                send_log(f"✅ Port scan completed → {asset}", scan_id)
-
-            except Exception as e:
-                db.rollback()
-                logger.error(e)
-
-            finally:
-                db.close()
+            threading.Thread(
+                target=run_port_scan,
+                args=(asset, scan_id, organization_id),
+                daemon=True
+            ).start()
 
         continue
 
-
-    # =====================================================
-    # EXISTING FLOW
-    # =====================================================
     if event_type != "asset_discovered":
         continue
 
     asset = normalize_asset(event.get("asset"))
     organization_id = event.get("organization_id")
 
-    if not asset:
-        continue
-
     key = f"{asset}:{scan_id}"
 
-    if key in scanned_assets:
-        continue
-
-    scanned_assets.add(key)
-
-    send_log(f"🔍 Preparing port scan → {asset}", scan_id)
-
-    db = SessionLocal()
-
-    try:
-        asset_record = None
-
-        for _ in range(5):
-
-            status = wait_if_paused(scan_id)
-            if status == "stopped":
-                break
-
-            asset_record = ensure_asset_exists(db, asset, organization_id)
-
-            if asset_record:
-                break
-
-            time.sleep(1)
-
-        if not asset_record:
+    with lock:
+        if key in active_scans:
+            logger.warning(f"⚠ Duplicate scan skipped → {key}")
             continue
+        active_scans.add(key)
 
-        send_log(f"🔍 Scanning ports → {asset}", scan_id)
-
-        # 🔥 INTERRUPTIBLE PORT SCAN
-        ports = []
-        try:
-            for port in scan_ports(asset):
-
-                status = wait_if_paused(scan_id)
-                if status == "stopped":
-                    logger.info(f"⛔ Stopped during port scan → {asset}")
-                    break
-
-                ports.append(port)
-
-        except Exception:
-            send_log(f"❌ Port scan failed → {asset}", scan_id)
-            continue
-
-        for port in ports:
-
-            status = wait_if_paused(scan_id)
-            if status == "stopped":
-                break
-
-            save_checkpoint(
-                scan_id,
-                stage="port_scan",
-                last_asset=asset,
-                meta={"port": port}
-            )
-
-            try:
-                store_port_scan_result(db, asset, port)
-
-                try:
-                    graph.add_port(asset, port)
-                except Exception:
-                    pass
-
-                send_event("port-scan-events", {
-                    "scan_id": scan_id,
-                    "organization_id": organization_id,
-                    "event_type": "port_open",
-                    "asset": asset,
-                    "port": port
-                })
-
-                send_log(f"🔓 Open port → {asset}:{port}", scan_id)
-
-            except Exception as e:
-                logger.error(e)
-
-        send_log(f"✅ Port scan completed → {asset}", scan_id)
-
-    except Exception as e:
-        db.rollback()
-        logger.error(e)
-        send_log(f"❌ Port scan crashed → {asset}", scan_id)
-
-    finally:
-        db.close()
+    threading.Thread(
+        target=run_port_scan,
+        args=(asset, scan_id, organization_id),
+        daemon=True
+    ).start()

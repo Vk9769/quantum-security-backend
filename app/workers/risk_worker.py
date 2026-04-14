@@ -52,7 +52,6 @@ def normalize_asset(asset: str) -> str:
 def get_asset_record_with_retry(db: Session, asset: str, retries: int = 2, delay: int = 2):
     for attempt in range(retries + 1):
 
-        # 🔥 CONTROL INSIDE RETRY LOOP
         status = check_scan_control(current_scan_id)
         if status == "stopped":
             return None
@@ -132,6 +131,7 @@ logger = logging.getLogger("RiskWorker")
 consumer = KafkaConsumer(
     "vulnerability-events",
     "cbom-events",
+    "risk-events",
     bootstrap_servers="localhost:9092",
     auto_offset_reset="latest",
     enable_auto_commit=True,
@@ -151,12 +151,8 @@ for message in consumer:
     event_type = event.get("event_type")
     scan_id = event.get("scan_id")
 
-    # 🔥 GLOBAL VARIABLE FOR HELPER ACCESS
     current_scan_id = scan_id
 
-    # =====================================================
-    # 🔥 GLOBAL SCAN CONTROL (HARD BLOCK)
-    # =====================================================
     status = check_scan_control(scan_id)
 
     if status == "paused":
@@ -167,11 +163,11 @@ for message in consumer:
         logger.info(f"⛔ Scan stopped → {scan_id}")
         continue
 
-    # =====================================================
     checkpoint = get_checkpoint(scan_id)
 
-    if checkpoint and checkpoint.get("stage") not in [None, "risk_analysis"]:
-        continue
+    if event_type != "analyze_risk":
+        if checkpoint and checkpoint.get("stage") not in [None, "risk_analysis"]:
+            continue
 
     db: Session = SessionLocal()
 
@@ -184,7 +180,6 @@ for message in consumer:
         # ============================================
         if event_type == "vulnerability_detected":
 
-            # 🔥 CONTROL CHECK BEFORE PROCESS
             if check_scan_control(scan_id) == "stopped":
                 continue
 
@@ -213,12 +208,7 @@ for message in consumer:
             send_log(f"📊 Risk score → {asset}: {risk_score}", scan_id)
 
             if risk_score >= 70:
-                send_alert(
-                    asset,
-                    "HIGH",
-                    f"Critical vulnerability {cve}",
-                    scan_id
-                )
+                send_alert(asset, "HIGH", f"Critical vulnerability {cve}", scan_id)
 
             asset_record = get_asset_record_with_retry(db, asset)
 
@@ -228,21 +218,23 @@ for message in consumer:
             store_asset_risk(db, asset_record.id, risk_score)
 
         # ============================================
-        # 2️⃣ CBOM / QUANTUM EVENTS
+        # 🔥 analyze_risk (FIXED ONLY HERE)
         # ============================================
-        elif event_type == "cbom_generated":
+        elif event_type == "analyze_risk":
 
-            # 🔥 CONTROL CHECK BEFORE HEAVY AI
+            asset = normalize_asset(event.get("asset"))
+
+            if not asset:
+                continue
+
+            logger.info(f"🧠 Risk trigger received → {asset}")
+            send_log(f"🧠 Risk analysis started → {asset}", scan_id)
+
             status = check_scan_control(scan_id)
             if status == "stopped":
                 continue
             if status == "paused":
                 time.sleep(2)
-                continue
-
-            asset = normalize_asset(event.get("asset"))
-
-            if not asset:
                 continue
 
             if checkpoint:
@@ -254,16 +246,12 @@ for message in consumer:
 
             graph.create_asset("unknown", asset)
 
-            # 🔥 CHECK BEFORE AI CALL
             if check_scan_control(scan_id) == "stopped":
                 continue
 
             quantum_risk = analyze_quantum_risk(event)
 
-            logger.info(
-                f"⚛ Quantum Risk → {asset} | "
-                f"{event.get('signature_algorithm')} | {quantum_risk}"
-            )
+            logger.info(f"⚛ Quantum Risk → {asset} | {event.get('signature_algorithm')} | {quantum_risk}")
             send_log(f"⚛ Quantum risk → {asset} ({quantum_risk})", scan_id)
 
             risk_score = get_quantum_risk_score(quantum_risk)
@@ -271,42 +259,34 @@ for message in consumer:
             logger.info(f"📊 Risk Score → {asset} = {risk_score}")
             send_log(f"📊 Risk score → {asset}: {risk_score}", scan_id)
 
-            # 🔥 CHECK BEFORE AI SOC
             if check_scan_control(scan_id) == "stopped":
                 continue
 
+            # ✅ FIX: GET asset_record BEFORE AI
+            asset_record = get_asset_record_with_retry(db, asset)
+            if not asset_record:
+                continue
+
             try:
-                ai_result = ai_soc.analyze(event) or {}
+                ai_input = {
+                    **event,
+                    "asset_id": asset_record.id  # ✅ FIX
+                }
+
+                ai_result = ai_soc.analyze(ai_input) or {}
                 attack_simulation = ai_result.get("attack_simulation", [])
                 recommendations = ai_result.get("recommendations", [])
                 attack_paths = ai_result.get("attack_paths", [])
-
-                logger.info(f"🤖 AI Attacks → {attack_simulation}")
-                logger.info(f"🧠 AI Recommendations → {recommendations}")
-                logger.info(f"🕸 Attack Paths → {attack_paths}")
-
             except Exception as e:
                 logger.error("AI SOC failed")
                 logger.error(e)
-
-                attack_simulation = []
-                recommendations = []
-                attack_paths = []
+                attack_simulation, recommendations, attack_paths = [], [], []
 
             if quantum_risk in ["NOT_QUANTUM_SAFE", "CRITICAL"]:
-                send_alert(
-                    asset,
-                    get_alert_severity(quantum_risk),
-                    f"Quantum vulnerable crypto ({quantum_risk})",
-                    scan_id
-                )
+                send_alert(asset, get_alert_severity(quantum_risk),
+                           f"Quantum vulnerable crypto ({quantum_risk})", scan_id)
 
             graph.add_risk(asset, risk_score, quantum_risk)
-
-            asset_record = get_asset_record_with_retry(db, asset)
-
-            if not asset_record:
-                continue
 
             algorithm = (
                 event.get("signature_algorithm")
@@ -338,10 +318,8 @@ for message in consumer:
 
     except Exception as e:
         db.rollback()
-
         logger.error("❌ Risk worker crashed")
         logger.error(e)
-
         send_log("❌ Risk processing failed", scan_id)
 
     finally:

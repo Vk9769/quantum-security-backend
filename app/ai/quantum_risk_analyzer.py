@@ -119,6 +119,17 @@ def analyze_quantum_risk(cbom):
     key_size = cbom.get("key_size")
 
     # -----------------------------------
+    # 🔥 PRIORITY FIX (HYBRID DETECTION FIRST)
+    # -----------------------------------
+
+    if (
+        ("MLKEM" in key_exchange or "KYBER" in key_exchange)
+        and ("X25519" in key_exchange or "ECDHE" in key_exchange)
+    ):
+        logger.info("Hybrid PQC key exchange detected (priority)")
+        return "HYBRID_POST_QUANTUM"
+
+    # -----------------------------------
     # 1️⃣ TLS VERSION CHECK
     # -----------------------------------
 
@@ -154,19 +165,11 @@ def analyze_quantum_risk(cbom):
         logger.info("Hybrid Post-Quantum TLS detected")
         return "HYBRID_POST_QUANTUM"
 
-    # Explicit hybrid groups like X25519+MLKEM / X25519+KYBER
-    if (
-        ("MLKEM" in key_exchange or "KYBER" in key_exchange)
-        and "X25519" in key_exchange
-    ):
-        logger.info("Hybrid PQC key exchange detected")
-        return "HYBRID_POST_QUANTUM"
-
     # -----------------------------------
     # 4️⃣ FULL PQC
     # -----------------------------------
 
-    if pqc_detected and not classical_detected:
+    if pqc_detected and not classical_detected and signature_algorithm:
         logger.info("Pure Post-Quantum cryptography detected")
         return "POST_QUANTUM_SAFE"
 

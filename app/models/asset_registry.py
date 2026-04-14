@@ -2,7 +2,6 @@ import uuid
 from sqlalchemy import Column, Text, DateTime, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
 
 from app.db.postgres import Base
 
@@ -25,10 +24,3 @@ class AssetRegistry(Base):
 
     status = Column(Text, nullable=True)
     criticality = Column(Text, nullable=True)
-
-    fingerprints = relationship(
-        "AssetFingerprint",
-        back_populates="asset",
-        cascade="all, delete-orphan",
-        passive_deletes=True
-    )

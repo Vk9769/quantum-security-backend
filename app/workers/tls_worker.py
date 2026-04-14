@@ -89,7 +89,6 @@ for message in consumer:
     event = message.value
 
     scan_id = event.get("scan_id")
-    asset = event.get("asset")
 
     # ============================================
     # 🔥 GLOBAL CONTROL (FAST CHECK)
@@ -105,10 +104,18 @@ for message in consumer:
         continue
 
     try:
-        if event.get("event_type") != "port_open":
-            continue
+        event_type = event.get("event_type")
 
-        if event.get("port") != 443:
+        # ✅ FIX: SUPPORT BOTH EVENTS
+        if event_type == "port_open":
+            if event.get("port") != 443:
+                continue
+            asset = event.get("asset")
+
+        elif event_type == "tls_scan_requested":
+            asset = event.get("asset")
+
+        else:
             continue
 
         if not asset:
@@ -173,7 +180,7 @@ for message in consumer:
             result = None
 
         # ============================================
-        # 🔥 CONTROL AFTER SCAN (CRITICAL FIX)
+        # 🔥 CONTROL AFTER SCAN
         # ============================================
         status = check_scan_control(scan_id)
 
@@ -224,7 +231,6 @@ for message in consumer:
 
             for _ in range(3):
 
-                # 🔥 CONTROL INSIDE RETRY LOOP
                 status = check_scan_control(scan_id)
 
                 if status == "stopped":

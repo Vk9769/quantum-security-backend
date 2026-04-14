@@ -4,6 +4,7 @@ import time  # ✅ FIX: REQUIRED FOR PAUSE LOOP
 from datetime import datetime
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from datetime import datetime, UTC
 from app.db.postgres import SessionLocal
 from app.models.scan_jobs import ScanJob
@@ -42,13 +43,13 @@ def send_log(message: str, scan_id: str = None):
     })
 
 
+# ✅ REMOVED fingerprint-events
 consumer = KafkaConsumer(
     "scan-events",
     "asset-events",
     "port-scan-events",
     "tls-events",
     "certificate-events",
-    "fingerprint-events",
     "cbom-events",
     "vulnerability-events",
     "alert-events",
@@ -148,7 +149,8 @@ def finish_scan_job(db: Session, scan_id):
     logger.info(f"Scan completed → {scan_id}")
 
     db.execute(
-        f"DELETE FROM scan_checkpoints WHERE scan_id = '{scan_id}'"
+        text("DELETE FROM scan_checkpoints WHERE scan_id = :scan_id"),
+        {"scan_id": scan_id}
     )
     db.commit()
 
@@ -176,20 +178,16 @@ for message in consumer:
 
     print("KAFKA MESSAGE RECEIVED:", event)
 
-    # ❌ NO SCAN ID
     if not scan_id:
         logger.warning("⚠ Missing scan_id → skipping event")
         continue
 
-    # =====================================================
-    # 🔥 HARD CONTROL LOOP (FIXED)
-    # =====================================================
     while True:
         status = check_scan_control(scan_id)
 
         if status == "stopped":
             logger.info(f"⛔ Hard stop → {scan_id}")
-            break  # stop processing immediately
+            break
 
         if status == "paused":
             logger.info(f"⏸ Paused → {scan_id}")
@@ -200,26 +198,18 @@ for message in consumer:
 
     if status == "stopped":
         continue
-    # =====================================================
 
-    # ✅ SAFE CHECKPOINT LOAD
     checkpoint = get_checkpoint(scan_id) or {}
 
     db: Session = SessionLocal()
 
     try:
 
-        # ------------------------------------
-        # Store every event
-        # ------------------------------------
         is_new = store_event_stream(db, event_type, event)
 
         if not is_new:
             continue
 
-        # ------------------------------------
-        # Scan Started
-        # ------------------------------------
         if event_type == "scan_started":
 
             domain = event["domain"]
@@ -237,23 +227,29 @@ for message in consumer:
             store_scan_event(db, scan_id, "asset_discovered", event)
             save_checkpoint(scan_id, "asset_discovered", last_asset=asset)
 
+            # 🔥 FIX: ENSURE ASSET IS INSERTED INTO DB
             asset_record = db.query(AssetRegistry).filter(
                 AssetRegistry.asset_identifier == asset
             ).first()
 
+            if not asset_record:
+                asset_record = AssetRegistry(
+                    organization_id="10024715-cd08-49a4-b316-4f394c14d267",
+                    asset_identifier=asset,
+                    asset_type="domain"
+                )
+                db.add(asset_record)
+                db.commit()
+                db.refresh(asset_record)
+
+                logger.info(f"✅ Asset inserted → {asset}")
+
+            # keep drift logic same
             if asset_record:
                 save_drift(db, asset_record.id, "New Asset", asset)
 
             logger.info(f"Asset discovered → {asset}")
             send_log(f"🌐 Asset discovered → {asset}", scan_id)
-
-        elif event_type == "fingerprint_completed":
-
-            store_scan_event(db, scan_id, "fingerprint_completed", event)
-            save_checkpoint(scan_id, "fingerprint", last_asset=event["asset"])
-
-            logger.info(f"Fingerprint completed → {event['asset']}")
-            send_log(f"🛰 Infra fingerprint completed → {event['asset']}", scan_id)
 
         elif event_type == "port_open":
 
@@ -313,6 +309,22 @@ for message in consumer:
             logger.info(f"CBOM generated → {event['asset']}")
             send_log(f"📦 CBOM generated → {event['asset']}", scan_id)
 
+            # 🔥 ADD THIS PART (IMPORTANT)
+            send_event("risk-events", {
+                "event_type": "analyze_risk",
+                "scan_id": scan_id,
+                "asset": event["asset"],
+                "tls_version": event.get("tls_version"),
+                "cipher_suite": event.get("cipher_suite"),
+                "key_exchange": event.get("key_exchange"),
+                "signature_algorithm": event.get("signature_algorithm"),
+                "key_size": event.get("key_size"),
+                "event_id": f"risk:{event['asset']}:{scan_id}"
+            })
+
+            logger.info(f"🚀 Risk triggered → {event['asset']}")
+            send_log(f"🧠 Risk analysis triggered → {event['asset']}", scan_id)
+
         elif topic == "vulnerability-events":
 
             store_scan_event(db, scan_id, "vulnerability_detected", event)
@@ -329,7 +341,8 @@ for message in consumer:
             logger.info(f"Alert → {event['asset']} {event['severity']}")
             send_log(f"🚨 Alert → {event['asset']} {event['severity']}", scan_id)
 
-            finish_scan_job(db, scan_id)
+            logger.info(f"Alert received → {event['asset']}")
+            send_log(f"🚨 Alert → {event['asset']} {event['severity']}", scan_id)
 
             logger.info(f"✅ Scan completed → {scan_id}")
             send_log("✅ Scan completed", scan_id)

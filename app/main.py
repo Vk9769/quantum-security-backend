@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import logging
 import threading
+import json
 
 from app.utils.log_streamer import setup_logger, set_main_loop
 from app.workers.log_consumer import start_log_consumer
@@ -35,6 +36,29 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# -----------------------------------------------------
+# GLOBAL ERROR HANDLER (FIXED WITH CORS HEADERS)
+# -----------------------------------------------------
+from fastapi.responses import Response
+from fastapi.requests import Request
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print("🔥 BACKEND ERROR:", str(exc))
+
+    response = Response(
+        content=json.dumps({"error": str(exc)}),
+        media_type="application/json",
+        status_code=200
+    )
+
+    # ✅ FIX: Manually add CORS headers
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+
+    return response
+
 # Disable uvicorn default logs
 logging.getLogger("uvicorn.access").disabled = True
 logging.getLogger("uvicorn.error").disabled = True
@@ -47,16 +71,7 @@ setup_logger()
 # -----------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://localhost:8000",
-        "http://127.0.0.1:8080",
-        "http://127.0.0.1:8000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000"
-    ],
+    allow_origins=["*"],  # TEMP: allow all
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

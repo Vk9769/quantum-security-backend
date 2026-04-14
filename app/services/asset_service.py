@@ -467,65 +467,84 @@ def get_assets_visibility(db: Session, asset_type: str = "all") -> List[dict]:
 
 
 def get_assets_counts(db: Session) -> dict:
-    domain_count = db.query(Domain).count()
-    subdomain_count = db.query(Subdomain).count()
+    try:
+        domain_count = db.query(Domain).count()
+        subdomain_count = db.query(Subdomain).count()
 
-    ssl_asset_ids = {
-        str(row.asset_id)
-        for row in db.query(TLSScanResult.asset_id).distinct().all()
-        if row.asset_id is not None
-    }
+        # SAFE TLS query
+        try:
+            ssl_asset_ids = {
+                str(row.asset_id)
+                for row in db.query(TLSScanResult.asset_id).distinct().all()
+                if row.asset_id is not None
+            }
+        except Exception:
+            ssl_asset_ids = set()
 
-    # Count only IP assets in the IP tab
-    ip_count = db.query(AssetRegistry).filter(
-        AssetRegistry.asset_type == "ip"
-    ).count()
+        # SAFE IP count
+        try:
+            ip_count = db.query(AssetRegistry).filter(
+                AssetRegistry.asset_type == "ip"
+            ).count()
+        except Exception:
+            ip_count = 0
 
-    # You currently don't have a software inventory table
-    software_count = 0
+        return {
+            "all": domain_count + subdomain_count,
+            "domain": domain_count,
+            "subdomain": subdomain_count,
+            "ssl": len(ssl_asset_ids),
+            "ip": ip_count,
+            "software": 0
+        }
 
-    return {
-        "all": domain_count + subdomain_count,
-        "domain": domain_count,
-        "subdomain": subdomain_count,
-        "ssl": len(ssl_asset_ids),
-        "ip": ip_count,
-        "software": software_count
-    }
+    except Exception as e:
+        logger.error(f"Error in get_assets_counts: {e}")
+        return {
+            "all": 0,
+            "domain": 0,
+            "subdomain": 0,
+            "ssl": 0,
+            "ip": 0,
+            "software": 0
+        }
 
 
 def get_assets_summary_data(db: Session) -> List[dict]:
-    counts = get_assets_counts(db)
+    try:
+        counts = get_assets_counts(db)
+        total_assets = counts.get("all", 0)
 
-    total_assets = counts["all"]
-
-    return [
-        {
-            "label": "Total Assets",
-            "value": str(total_assets),
-            "change": "+0%",
-            "icon": "Server",
-            "positive": True
-        },
-        {
-            "label": "New Issues",
-            "value": "0",
-            "change": "+0%",
-            "icon": "AlertTriangle",
-            "positive": False
-        },
-        {
-            "label": "Resolved Issues",
-            "value": "0",
-            "change": "+0%",
-            "icon": "CheckCircle",
-            "positive": True
-        },
-        {
-            "label": "Ignored Issues",
-            "value": "0",
-            "change": "+0%",
-            "icon": "XCircle",
-            "positive": False
-        }
-    ]
+        return [
+            {
+                "label": "Total Assets",
+                "value": str(total_assets),
+                "change": "+0%",
+                "icon": "Server",
+                "positive": True
+            },
+            {
+                "label": "New Issues",
+                "value": "0",
+                "change": "+0%",
+                "icon": "AlertTriangle",
+                "positive": False
+            },
+            {
+                "label": "Resolved Issues",
+                "value": "0",
+                "change": "+0%",
+                "icon": "CheckCircle",
+                "positive": True
+            },
+            {
+                "label": "Ignored Issues",
+                "value": "0",
+                "change": "+0%",
+                "icon": "XCircle",
+                "positive": False
+            }
+        ]
+    except Exception as e:
+        logger.error(f"Error in get_assets_summary_data: {e}")
+        return []

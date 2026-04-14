@@ -24,6 +24,9 @@ from app.ai.simulators.mitm_simulator import simulate_mitm
 from app.ai.llm.llm_router import LLMRouter
 from app.ai.llm.prompts import build_security_prompt
 
+from app.services.ai_agent_service import save_ai_result
+from app.db.postgres import SessionLocal
+
 logger = logging.getLogger("AISOC")
 
 
@@ -145,7 +148,6 @@ class AISOC:
                         prompt=prompt
                     )
 
-                    # fallback if LLM fails
                     if "LLM_ERROR" in str(explanation):
                         explanation = self._fallback_explanation(
                             features, attacks
@@ -153,7 +155,7 @@ class AISOC:
 
                     logger.info("🧠 LLM Explanation generated")
 
-                except Exception as e:
+                except Exception:
                     logger.warning("⚠ LLM failed → using fallback")
                     explanation = self._fallback_explanation(
                         features, attacks
@@ -174,37 +176,55 @@ class AISOC:
             result = {
                 "asset": asset,
                 "features": features,
-
-                # AI Core
                 "attack_simulation": attacks,
                 "attack_paths": attack_paths,
                 "recommendations": recommendations,
-
-                # Advanced AI
                 "crypto_issues": crypto_issues,
                 "pqc_plan": pqc_plan,
                 "scan_actions": scan_actions,
                 "mitm_simulation": mitm_result,
-
-                # ML
                 "risk_score": risk_score,
                 "anomalies": anomalies,
-
-                # LLM
                 "explanation": explanation,
-
-                # Report
                 "report": report
             }
+
+            # -----------------------------------
+            # 💾 STORE AI RESULTS IN DATABASE
+            # -----------------------------------
+            db = None
+            try:
+                db = SessionLocal()
+
+                asset_id = tls_event.get("asset_id")
+                scan_id = tls_event.get("scan_id", None)
+
+                if not asset_id:
+                    logger.warning("⚠ Missing asset_id → skipping AI DB storage")
+                    return result
+
+                # Save all results (NO COMMIT INSIDE SERVICE)
+                save_ai_result(db, asset_id, scan_id, "attack_agent", "attack_simulation", attacks, "high", 0.9)
+                save_ai_result(db, asset_id, scan_id, "crypto_agent", "crypto_issues", crypto_issues)
+                save_ai_result(db, asset_id, scan_id, "pqc_agent", "recommendations", recommendations)
+                save_ai_result(db, asset_id, scan_id, "risk_model", "risk_score", {"score": risk_score}, confidence=0.95)
+
+                # ✅ SINGLE COMMIT (IMPORTANT FIX)
+                db.commit()
+
+            except Exception:
+                logger.exception("❌ Failed to store AI results")
+
+            finally:
+                if db:
+                    db.close()
 
             logger.info(f"✅ AI SOC completed → {asset}")
 
             return result
 
-        except Exception as e:
-
-            logger.error(f"❌ AI SOC failed → {e}")
-
+        except Exception:
+            logger.exception("❌ AI SOC failed")
             return self._empty_response()
 
     # ======================================================
