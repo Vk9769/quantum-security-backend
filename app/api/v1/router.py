@@ -19,6 +19,7 @@ from app.api.v1.drift_routes import router as drift_router
 from app.api.v1.cbom_routes import router as cbom_router
 from app.api.v1.certificate_map_routes import router as certificate_map_router
 from app.api.v1.scan_history_routes import router as scan_history_router
+from app.api.v1.ai_routes import router as ai_router
 
 # SERVICES
 from app.db.postgres import engine
@@ -134,3 +135,4 @@ router.include_router(drift_router, prefix="/drift", tags=["Drift"])
 router.include_router(cbom_router, prefix="/cbom", tags=["CBOM"])
 router.include_router(certificate_map_router, prefix="/map", tags=["Map"])
 router.include_router(scan_history_router, tags=["Scan History"])
+router.include_router(ai_router, tags=["AI Analysis"])

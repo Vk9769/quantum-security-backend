@@ -24,7 +24,6 @@ def store_asset_risk(db, asset_id, score):
     )
 
     db.add(record)
-    db.commit()
 
 
 def get_global_risk_score(db):

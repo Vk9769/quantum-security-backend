@@ -1,8 +1,9 @@
 import logging
+import json
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.ai.models.ai_agent_result import AIAgentResult
+from app.models.ai_agent_results import AIAgentResult
 
 logger = logging.getLogger("AIService")
 
@@ -38,7 +39,7 @@ def save_ai_result(
             scan_id=scan_id,
             agent_name=agent_name,
             result_type=result_type,
-            result_data=result_data,
+            result_data=json.dumps(result_data) if isinstance(result_data, (dict, list)) else result_data,
             severity=severity,
             confidence=confidence,
         )
@@ -80,7 +81,7 @@ def save_multiple_ai_results(db: Session, results: list):
                 scan_id=r.get("scan_id"),
                 agent_name=r.get("agent_name"),
                 result_type=r.get("result_type"),
-                result_data=r.get("result_data"),
+                result_data=json.dumps(r.get("result_data")) if isinstance(r.get("result_data"), (dict, list)) else r.get("result_data"),
                 severity=r.get("severity"),
                 confidence=r.get("confidence"),
             )

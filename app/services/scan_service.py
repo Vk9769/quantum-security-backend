@@ -92,7 +92,7 @@ def store_certificate_result(
     asset_hostname: str,
     issuer: str,
     subject: str,
-    expiry: date,
+    expiry,
     signature_algorithm: str,
     key_size: int
 ):
@@ -105,14 +105,19 @@ def store_certificate_result(
         else:
             logger.info(f"✅ Asset found → {asset_hostname}")
 
+        # 🔥 FIX 1: Normalize expiry to DATE
+        if expiry and isinstance(expiry, datetime):
+            expiry = expiry.date()
+
+        # 🔥 FIX 2: Strong duplicate check
         existing = db.query(Certificate).filter(
             Certificate.asset_id == asset.id,
             Certificate.signature_algorithm == signature_algorithm,
-            Certificate.expiry_date == expiry
+            Certificate.expiry_date == expiry,
+            Certificate.subject == subject
         ).first()
 
         if existing:
-            # ✅ UPDATE existing certificate
             existing.issuer = issuer
             existing.subject = subject
             existing.expiry_date = expiry
@@ -120,6 +125,7 @@ def store_certificate_result(
             existing.key_size = key_size
 
             logger.info(f"🔄 Certificate updated → {asset_hostname}")
+            logger.info(f"⏭ Certificate already exists → {asset_hostname}")
 
         else:
             cert = Certificate(
@@ -134,7 +140,16 @@ def store_certificate_result(
             db.add(cert)
             logger.info(f"💾 Certificate stored → {asset_hostname}")
 
-        db.commit()
+        # 🔥 FIX 3: Safe commit (race condition fix)
+        try:
+            db.commit()
+        except SQLAlchemyError as e:
+            db.rollback()
+
+            if "unique_certificate" in str(e):
+                logger.warning(f"⚠ Duplicate certificate avoided → {asset_hostname}")
+            else:
+                raise
 
     except SQLAlchemyError as e:
         db.rollback()

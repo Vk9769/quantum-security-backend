@@ -270,6 +270,18 @@ for message in consumer:
         }
 
         send_event("cbom-events", cbom_event, key=asset)
+        
+        # 🔥 TRIGGER AI FROM CBOM ALSO
+        send_event("risk-events", {
+            "event_id": f"analyze_risk:{asset}:{scan_id}",
+            "scan_id": scan_id,
+            "event_type": "analyze_risk",
+            "asset": asset,
+            "tls_version": cbom_data.get("tls_version"),
+            "cipher_suite": cbom_data.get("cipher_suite"),
+            "key_exchange": cbom_data.get("key_exchange"),
+            "signature_algorithm": cert_data.get("signature_algorithm")
+        }, key=asset)
 
         logger.info(f"📤 CBOM event sent → {asset}")
         send_log(f"📤 CBOM event sent → {asset}", scan_id)

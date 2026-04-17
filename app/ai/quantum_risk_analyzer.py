@@ -158,11 +158,12 @@ def analyze_quantum_risk(cbom):
     combined_text = f"{cipher} {key_exchange} {signature_algorithm}"
 
     # -----------------------------------
-    # 3️⃣ HYBRID PQC (Best case)
+    # 🔥 HYBRID PQC DETECTION (CORRECT)
     # -----------------------------------
 
-    if pqc_detected and classical_detected:
-        logger.info("Hybrid Post-Quantum TLS detected")
+    if any(pqc in key_exchange for pqc in ["MLKEM", "KYBER"]) and \
+    any(classical in key_exchange for classical in ["X25519", "ECDHE"]):
+        logger.info("Hybrid PQC key exchange detected")
         return "HYBRID_POST_QUANTUM"
 
     # -----------------------------------

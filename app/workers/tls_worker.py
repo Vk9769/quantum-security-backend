@@ -19,9 +19,12 @@ from app.utils.scan_control import check_scan_control
 
 # ✅ CHECKPOINT
 from app.utils.checkpoint import save_checkpoint, get_checkpoint
+from collections import deque
 
+processed_cache = deque(maxlen=1000)
 
 # -------------------- HELPERS --------------------
+
 
 def send_log(message: str, scan_id: str = None):
     send_event("scan-logs", {
@@ -70,7 +73,7 @@ logger = logging.getLogger("TLSWorker")
 graph = GraphService()
 
 consumer = KafkaConsumer(
-    "port-scan-events",
+    "tls-events",
     bootstrap_servers="localhost:9092",
     auto_offset_reset="latest",
     group_id="tls-worker",
@@ -130,20 +133,13 @@ for message in consumer:
         # ==============================
         checkpoint = get_checkpoint(scan_id)
 
-        skip = False
         if checkpoint:
             last_asset = checkpoint.get("last_asset")
-            skip = True if last_asset else False
-        else:
-            last_asset = None
 
-        if skip:
+            # ❗ Skip ONLY the same asset (avoid reprocessing)
             if asset == last_asset:
-                skip = False
-            else:
-                logger.info(f"⏭ Skipping already processed TLS → {asset}")
+                logger.info(f"⏭ Skipping already processed → {asset}")
                 continue
-
         # ============================================
         # 🔥 CONTROL BEFORE SCAN (CRITICAL)
         # ============================================
@@ -157,7 +153,13 @@ for message in consumer:
             time.sleep(2)
             continue
 
-        logger.info(f"🔐 TLS Scan started → {asset}")
+        processed_key = f"{scan_id}:{asset}"
+
+        if processed_key in processed_cache:
+            logger.info(f"⚠ Duplicate TLS scan skipped → {asset}")
+            continue
+
+        processed_cache.append(processed_key)
         send_log(f"🔐 TLS scan started → {asset}", scan_id)
 
         # SAVE CHECKPOINT
@@ -308,7 +310,19 @@ for message in consumer:
             "expiry": result.get("expiry"),
             "forward_secrecy": forward_secrecy
         }, key=asset)
-
+        
+        # 🔥 TRIGGER AI RISK ANALYSIS
+        send_event("risk-events", {
+            "event_id": f"analyze_risk:{asset}:{scan_id}",
+            "scan_id": scan_id,
+            "event_type": "analyze_risk",
+            "asset": asset,
+            "tls_version": tls_version,
+            "cipher_suite": cipher_suite,
+            "key_exchange": key_exchange,
+            "signature_algorithm": result.get("signature_algorithm"),
+            "certificate_issuer": result.get("certificate_issuer")
+        }, key=asset)
         logger.info(f"TLS event sent → {asset}")
         send_log(f"🔐 TLS scan completed → {asset}", scan_id)
 

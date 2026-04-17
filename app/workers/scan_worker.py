@@ -34,7 +34,6 @@ consumer = KafkaConsumer(
     "scan-events",
     "asset-events",
     "port-scan-events",
-    "tls-events",
     "certificate-events",
     "cbom-events",
     bootstrap_servers="localhost:9092",

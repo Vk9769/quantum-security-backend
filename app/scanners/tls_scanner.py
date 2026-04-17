@@ -158,7 +158,9 @@ def python_tls_socket(host):
                     "signature_algorithm": safe_signature_algorithm(cert),
                     "key_size": safe_public_key_size(cert),
                     "public_key_type": safe_public_key_type(cert),
-                    "quantum_security": detect_pqc(cipher[0])
+                    "quantum_security": detect_pqc(
+                        f"{cipher[0]} {safe_signature_algorithm(cert)}"
+                    )
                 }
 
     except Exception as e:
@@ -343,8 +345,7 @@ def openssl_tls(host):
                 f"openssl s_client "
                 f"-connect {host}:443 "
                 f"-servername {host} "
-                f"-showcerts "
-                f"-tls1_3"
+                f"-showcerts"
             )
         ]
 
@@ -384,12 +385,23 @@ def openssl_tls(host):
             elif line.startswith("Cipher    :"):
                 cipher = line.split(":", 1)[1].strip()
 
+                # 🔥 Extract key exchange from cipher (TLS 1.2 fix)
+                if cipher and "-" in cipher and not key_exchange:
+                    key_exchange = cipher.split("-")[0]
+
             elif line.startswith("Cipher is"):
                 cipher = line.split("Cipher is", 1)[1].strip()
 
             elif "Server Temp Key:" in line or "Peer Temp Key:" in line:
-                 key_exchange = line.split(":", 1)[1].strip()
+                key_exchange = line.split(":", 1)[1].strip()
 
+            elif "Key Exchange:" in line:
+                key_exchange = line.split(":", 1)[1].strip()
+
+            elif "ECDHE" in line or "ECDH" in line or "RSA" in line:
+                if not key_exchange:
+                    key_exchange = line.strip()
+                 
             elif "Negotiated TLS1.3 group:" in line:
                 key_exchange = line.split(":", 1)[1].strip()
 
@@ -399,6 +411,12 @@ def openssl_tls(host):
             elif "Peer signature type:" in line:
                 signature_algorithm = line.split(":", 1)[1].strip()
 
+            elif "Signature Algorithm:" in line:
+                signature_algorithm = line.split(":", 1)[1].strip()
+
+            elif "Server signature algorithm:" in line:
+                signature_algorithm = line.split(":", 1)[1].strip()
+            
             elif "sigalg:" in line.lower():
                 try:
                     signature_algorithm = line.split("sigalg:", 1)[1].strip().split()[0]
@@ -744,7 +762,32 @@ def scan_tls(host):
     if socket_result:
         logger.info("TLS success via Python socket")
         final_result = merge_results(final_result, socket_result)
+    
+    # 🔥 TLS 1.2 fallback (VERY IMPORTANT)
+    if not socket_result or not socket_result.get("cipher_suite"):
+        try:
+            logger.info("Retry TLS with TLS1.2 fallback")
 
+            context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+            with socket.create_connection((host, 443), timeout=5) as sock:
+                with context.wrap_socket(sock, server_hostname=host) as ssock:
+                    cipher = ssock.cipher()
+
+                    fallback_result = {
+                        "tls_version": "TLSv1.2",
+                        "cipher_suite": cipher[0],
+                        "cipher_protocol": cipher[1],
+                        "cipher_bits": cipher[2]
+                    }
+
+                    final_result = merge_results(final_result, fallback_result)
+
+        except Exception as e:
+            logger.warning(f"TLS1.2 fallback failed → {host} | {e}")
+            
     # 3 OpenSSL enrichment
     openssl_result = openssl_tls(host)
     if openssl_result:
@@ -760,8 +803,10 @@ def scan_tls(host):
     # If we already got strong active results, return now
     if final_result.get("tls_version") or final_result.get("cipher_suite"):
         final_result["quantum_security"] = detect_pqc(
-            f"{final_result.get('key_exchange', '')} {final_result.get('cipher_suite', '')}"
-        )
+                                                f"{final_result.get('key_exchange', '')} "
+                                                f"{final_result.get('cipher_suite', '')} "
+                                                f"{final_result.get('signature_algorithm', '')}"
+                                            )
         return final_result
 
     # 5 Cloud probe
