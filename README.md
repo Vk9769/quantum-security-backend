@@ -370,6 +370,96 @@ app/
 
 ---
 
+---
+
+## 🚀 Future Scope
+
+QuantumSentinel is designed to evolve into a **comprehensive next-generation cybersecurity platform**. The following enhancements are planned:
+
+### 🔍 Advanced API Discovery
+- Deep API endpoint discovery using:
+  - Katana
+  - Kiterunner
+  - httpx
+  - Amass
+- Detection of hidden, undocumented, and shadow APIs
+- Full API attack surface mapping
+
+---
+
+### 🌐 IoT & Device Security Analysis
+- Extend scanning to **IoT and smart devices**
+- Identify weak cryptographic implementations in embedded systems
+- Evaluate whether IoT devices are **PQC-ready or vulnerable**
+
+---
+
+### ⚛️ Enhanced PQC Readiness Engine
+- Advanced classification of cryptographic algorithms
+- Real-time PQC compliance monitoring
+- Automated suggestions for migration to **Post-Quantum Cryptography**
+
+---
+
+### 🛡️ Advanced Vulnerability Detection
+- Integration with modern tools:
+  - Nuclei (template-based scanning)
+  - Katana (crawler)
+  - Kiterunner (API fuzzing)
+  - httpx (HTTP probing)
+- Automated detection of:
+  - Misconfigurations
+  - Exposed services
+  - Weak TLS setups
+
+---
+
+### 🤖 AI Chatbot & Virtual Assistant
+- AI-powered security assistant for:
+  - Querying scan results
+  - Explaining vulnerabilities
+  - Providing remediation steps
+- Natural language interface for analysts:
+  > "Show high-risk assets"  
+  > "Which systems are not PQC ready?"
+
+---
+
+### ☁️ Platform as a Service (PaaS)
+- Offer QuantumSentinel as a **cloud-based API service**
+- External integration via:
+  - REST APIs
+  - Webhooks
+- Enable enterprises to integrate into their **SIEM / SOC pipelines**
+
+---
+
+### 🖥️ CLI Mode (Developer Friendly)
+- Lightweight CLI tool for:
+  - Running scans directly from terminal
+  - Generating CBOM reports
+  - Automating security workflows
+- Example:
+```bash
+qs scan example.com
+qs report --cbom
+```
+
+🔗 SIEM & Enterprise Integration
+Integration with tools like:
+Splunk
+ELK Stack
+Microsoft Sentinel
+Real-time alert forwarding and monitoring
+📊 Predictive Risk Intelligence
+AI models to predict future vulnerabilities
+Trend analysis on cryptographic posture
+Risk forecasting for proactive security
+
+💡 Vision:
+
+Transform QuantumSentinel into a fully autonomous, AI-driven, quantum-aware cybersecurity platform capable of securing both current and future digital infrastructures.
+
 # ⚙️ Installation & Setup Guide
 
 Follow these steps to run **QuantumSentinel** locally.
