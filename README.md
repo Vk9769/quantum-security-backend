@@ -444,6 +444,7 @@ QuantumSentinel is designed to evolve into a **comprehensive next-generation cyb
 qs scan example.com
 qs report --cbom
 ```
+---
 
 ### 🔗 SIEM & Enterprise Integration
 - Integration with tools like:
@@ -451,15 +452,21 @@ qs report --cbom
   - ELK Stack
   - Microsoft Sentinel
   - Real-time alert forwarding and monitoring
-    
+
+---
+
 ### 📊 Predictive Risk Intelligence
 - AI models to predict future vulnerabilities
 - Trend analysis on cryptographic posture
 - Risk forecasting for proactive security
+- 
+---
 
 ### 💡 Vision:
 
 Transform QuantumSentinel into a fully autonomous, AI-driven, quantum-aware cybersecurity platform capable of securing both current and future digital infrastructures.
+
+---
 
 # ⚙️ Installation & Setup Guide
 
