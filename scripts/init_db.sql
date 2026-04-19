@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS public.ai_agent_results
     confidence double precision,
     result_data jsonb NOT NULL,
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    execution_time double precision,
+    model_version text COLLATE pg_catalog."default",
     CONSTRAINT ai_agent_results_pkey PRIMARY KEY (id)
 );
 

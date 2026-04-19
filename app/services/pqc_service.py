@@ -401,3 +401,84 @@ def build_pqc_dashboard(db: Session, domain: Optional[str] = None):
         "recommendations": recommendations,
         "app_details": app_details
     }
+    
+    
+def get_pqc_readiness(db: Session, domain: Optional[str] = None, scan_id: Optional[str] = None):
+
+    query = db.query(AssetRegistry)
+
+    # ✅ FILTER (same as dashboard but clean)
+    if scan_id:
+        from app.models.scan_jobs import ScanJob
+
+        scan = db.query(ScanJob).filter(
+            ScanJob.id == scan_id
+        ).first()
+
+        if scan and scan.domain:
+            query = query.filter(
+                (AssetRegistry.asset_identifier.ilike(f"%.{scan.domain}")) |
+                (AssetRegistry.asset_identifier == scan.domain)
+            )
+        else:
+            return {
+                "quantum_safe": 0,
+                "upgrade_required": 0,
+                "not_pqc_ready": 0
+            }
+
+    elif domain:
+        query = query.filter(
+            (AssetRegistry.asset_identifier.ilike(f"%.{domain}")) |
+            (AssetRegistry.asset_identifier == domain)
+        )
+
+    else:
+        return {
+            "quantum_safe": 0,
+            "upgrade_required": 0,
+            "not_pqc_ready": 0
+        }
+
+    assets = query.all()
+
+    elite = 0
+    standard = 0
+    legacy = 0
+    critical = 0
+
+    for asset in assets:
+
+        tls = db.query(TLSScanResult).filter(
+            TLSScanResult.asset_id == asset.id
+        ).first()
+
+        cbom = db.query(CBOMInventory).filter(
+            CBOMInventory.asset_id == asset.id
+        ).first()
+
+        pqc = db.query(PQCAnalysis).filter(
+            PQCAnalysis.asset_id == asset.id
+        ).order_by(PQCAnalysis.id.desc()).first()
+
+        support = bool(pqc.pqc_ready) if pqc else False
+        tls_version = tls.tls_version if tls else (cbom.tls_version if cbom else None)
+        quantum_risk = cbom.quantum_risk if cbom else None
+
+        if support and tls_version and tls_version.upper() in ["TLSV1.3", "TLS1.3"]:
+            elite += 1
+
+        elif support:
+            standard += 1
+
+        elif quantum_risk and quantum_risk.upper() == "CRITICAL":
+            critical += 1
+
+        else:
+            legacy += 1
+
+    return {
+        "quantum_safe": elite,
+        "upgrade_required": standard + legacy,
+        "not_pqc_ready": critical
+    }

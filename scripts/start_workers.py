@@ -9,6 +9,7 @@ workers = [
     "app.workers.certificate_worker",
     "app.workers.fingerprint_worker",
     "app.workers.cbom_worker",
+    "app.workers.vulnerability_worker",
     "app.workers.risk_worker",
     "app.workers.alert_worker",
     "app.workers.orchestrator_worker"

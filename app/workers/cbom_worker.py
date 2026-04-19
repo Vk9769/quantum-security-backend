@@ -285,7 +285,15 @@ for message in consumer:
 
         logger.info(f"📤 CBOM event sent → {asset}")
         send_log(f"📤 CBOM event sent → {asset}", scan_id)
-
+        # 🔥 TRIGGER VULNERABILITY SCAN (IMPORTANT)
+        send_event("vulnerability-scan-topic", {
+            "scan_id": scan_id,
+            "event_type": "start_vulnerability_scan",
+            "asset": asset
+        }, key=asset)
+        logger.info(f"🛡️ Vulnerability scan triggered → {asset}")
+        send_log(f"🛡️ Vulnerability scan triggered → {asset}", scan_id)
+        
     except Exception as e:
 
         db.rollback()

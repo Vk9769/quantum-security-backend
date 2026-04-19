@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db.postgres import get_db
 from app.schemas.pqc_schema import PQCDashboardResponse, PQCAppDetails
-from app.services.pqc_service import build_pqc_dashboard, get_pqc_asset_details
+from app.services.pqc_service import build_pqc_dashboard, get_pqc_asset_details, get_pqc_readiness
 
 router = APIRouter()
 
@@ -34,3 +34,11 @@ def get_asset_details(
         raise HTTPException(status_code=404, detail="Asset details not found")
 
     return details
+
+@router.get("/pqc/readiness")
+def pqc_readiness(
+    domain: Optional[str] = Query(None),
+    scan_id: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    return get_pqc_readiness(db, domain, scan_id)

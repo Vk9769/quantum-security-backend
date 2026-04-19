@@ -5,11 +5,18 @@ from app.models.risk import AssetRiskScore
 from app.models.asset_registry import AssetRegistry
 from app.models.tls import TLSScanResult
 from app.models.certificate import Certificate
-
+from app.models.scan_jobs import ScanJob
+from app.models.cbom import CBOMInventory
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 def store_asset_risk(db, asset_id, score):
-    category = "LOW"
 
+    existing = db.query(AssetRiskScore).filter(
+        AssetRiskScore.asset_id == asset_id
+    ).first()
+
+    category = "LOW"
     if score >= 70:
         category = "CRITICAL"
     elif score >= 40:
@@ -17,36 +24,44 @@ def store_asset_risk(db, asset_id, score):
     elif score >= 20:
         category = "MEDIUM"
 
-    record = AssetRiskScore(
-        asset_id=asset_id,
-        score=score,
-        risk_category=category
-    )
+    if existing:
+        existing.score = score
+        existing.risk_category = category
+    else:
+        db.add(AssetRiskScore(
+            asset_id=asset_id,
+            score=score,
+            risk_category=category
+        ))
 
-    db.add(record)
+    db.commit()  # ✅ MUST
 
 
 def get_global_risk_score(db):
-    total_assets = db.query(AssetRegistry).count()
 
-    if total_assets == 0:
+    rows = db.query(
+        AssetRiskScore.score
+    ).all()
+
+    if not rows:
         return {
             "score": 0,
             "label": "No Risk",
             "change": 0
         }
 
-    weak_tls = db.query(TLSScanResult).filter(
-        TLSScanResult.tls_version != "TLS 1.3"
-    ).count()
+    scores = [r[0] for r in rows if r[0] is not None]
 
-    expired_certs = db.query(Certificate).filter(
-        Certificate.expiry_date.isnot(None),
-        Certificate.expiry_date < date.today()
-    ).count()
+    if not scores:
+        return {
+            "score": 0,
+            "label": "No Risk",
+            "change": 0
+        }
 
-    risk_score = (weak_tls * 2) + (expired_certs * 3)
-    risk_score = min(risk_score, 100)
+    avg_score = sum(scores) / len(scores)
+
+    risk_score = min(int(avg_score), 100)
 
     if risk_score >= 80:
         label = "High Risk"
@@ -107,11 +122,14 @@ def get_risk_tiers(db):
 
 
 def get_domain_risk_score(db, domain: str):
-    asset = db.query(AssetRegistry).filter(
-        AssetRegistry.asset_identifier == domain
-    ).first()
 
-    if not asset:
+    assets = db.query(AssetRegistry.id).filter(
+        AssetRegistry.asset_identifier.ilike(f"%{domain}%")
+    ).all()
+
+    asset_ids = [a[0] for a in assets]
+
+    if not asset_ids:
         return {
             "domain": domain,
             "asset_id": None,
@@ -124,34 +142,29 @@ def get_domain_risk_score(db, domain: str):
             "certificate_expiry": None
         }
 
-    tls = db.query(TLSScanResult).filter(
-        TLSScanResult.asset_id == asset.id
-    ).order_by(TLSScanResult.scan_time.desc()).first()
+    scores = db.query(AssetRiskScore.score).filter(
+        AssetRiskScore.asset_id.in_(asset_ids)
+    ).all()
 
-    cert = db.query(Certificate).filter(
-        Certificate.asset_id == asset.id
-    ).first()
+    scores = [s[0] for s in scores if s[0] is not None]
 
-    risk_score = 0
-    weak_tls = False
-    tls_version = None
-    expired_cert = False
-    certificate_expiry = None
+    if not scores:
+        return {
+            "domain": domain,
+            "asset_id": None,
+            "score": 0,
+            "label": "No Data",
+            "change": 0,
+            "weak_tls": False,
+            "tls_version": None,
+            "expired_cert": False,
+            "certificate_expiry": None
+        }
 
-    if tls:
-        tls_version = tls.tls_version
-        if tls.tls_version != "TLS 1.3":
-            weak_tls = True
-            risk_score += 40
+    avg = sum(scores) / len(scores)
+    risk_score = min(int(avg), 100)
 
-    if cert and cert.expiry_date:
-        certificate_expiry = str(cert.expiry_date)
-        if cert.expiry_date < date.today():
-            expired_cert = True
-            risk_score += 60
-
-    risk_score = min(risk_score, 100)
-
+    # ✅ LABEL LOGIC
     if risk_score >= 80:
         label = "High Risk"
     elif risk_score >= 60:
@@ -163,14 +176,14 @@ def get_domain_risk_score(db, domain: str):
 
     return {
         "domain": domain,
-        "asset_id": str(asset.id),
+        "asset_id": None,
         "score": risk_score,
         "label": label,
         "change": 0,
-        "weak_tls": weak_tls,
-        "tls_version": tls_version,
-        "expired_cert": expired_cert,
-        "certificate_expiry": certificate_expiry
+        "weak_tls": False,
+        "tls_version": None,
+        "expired_cert": False,
+        "certificate_expiry": None
     }
 
 
@@ -249,3 +262,69 @@ def get_domain_risk_tiers(db, domain: str):
     ]
 
     return tiers
+
+
+def get_scan_risk_tiers(db: Session, scan_id: str):
+
+    # -----------------------------
+    # GET DOMAIN FROM SCAN
+    # -----------------------------
+    scan = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+
+    if not scan or not scan.domain:
+        return []
+
+    # -----------------------------
+    # GET ASSETS ONLY FOR DOMAIN
+    # -----------------------------
+    asset_ids = [
+        row.id
+        for row in db.query(AssetRegistry.id)
+        .filter(AssetRegistry.asset_identifier.ilike(f"%{scan.domain}%"))
+        .all()
+    ]
+
+    if not asset_ids:
+        return []
+
+    # -----------------------------
+    # GET RISK FROM SAME ASSETS
+    # -----------------------------
+    results = (
+        db.query(
+            func.upper(AssetRiskScore.risk_category),
+            func.count().label("count")
+        )
+        .filter(AssetRiskScore.asset_id.in_(asset_ids))
+        .group_by(func.upper(AssetRiskScore.risk_category))
+        .all()
+    )
+
+    counts_map = {r[0]: r[1] for r in results}
+
+    return [
+        {
+            "label": "Critical",
+            "count": counts_map.get("CRITICAL", 0),
+            "color": "bg-destructive",
+            "textColor": "text-destructive"
+        },
+        {
+            "label": "High",
+            "count": counts_map.get("HIGH", 0),
+            "color": "bg-warning",
+            "textColor": "text-warning"
+        },
+        {
+            "label": "Medium",
+            "count": counts_map.get("MEDIUM", 0),
+            "color": "bg-primary",
+            "textColor": "text-primary"
+        },
+        {
+            "label": "Low",
+            "count": counts_map.get("LOW", 0),
+            "color": "bg-success",
+            "textColor": "text-success"
+        }
+    ]
