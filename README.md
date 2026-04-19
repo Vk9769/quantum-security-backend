@@ -459,7 +459,7 @@ qs report --cbom
 - AI models to predict future vulnerabilities
 - Trend analysis on cryptographic posture
 - Risk forecasting for proactive security
-- 
+
 ---
 
 ### 💡 Vision:
