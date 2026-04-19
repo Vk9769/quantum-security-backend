@@ -254,7 +254,7 @@ Dashboard + Alerts + Reports
 ---
 
 ## 📁 Backend Structure
-
+```
 app/
 │
 ├── main.py                 # Entry point
@@ -293,6 +293,7 @@ app/
 ├── utils/                  # Helper utilities
 │
 └── logs/                   # Runtime logs (if enabled)
+```
 
 ## 🔐 Security Features
 
