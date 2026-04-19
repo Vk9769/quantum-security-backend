@@ -445,18 +445,19 @@ qs scan example.com
 qs report --cbom
 ```
 
-🔗 SIEM & Enterprise Integration
-Integration with tools like:
-Splunk
-ELK Stack
-Microsoft Sentinel
-Real-time alert forwarding and monitoring
-📊 Predictive Risk Intelligence
-AI models to predict future vulnerabilities
-Trend analysis on cryptographic posture
-Risk forecasting for proactive security
+### 🔗 SIEM & Enterprise Integration
+- Integration with tools like:
+  - Splunk
+  - ELK Stack
+  - Microsoft Sentinel
+  - Real-time alert forwarding and monitoring
+    
+### 📊 Predictive Risk Intelligence
+- AI models to predict future vulnerabilities
+- Trend analysis on cryptographic posture
+- Risk forecasting for proactive security
 
-💡 Vision:
+### 💡 Vision:
 
 Transform QuantumSentinel into a fully autonomous, AI-driven, quantum-aware cybersecurity platform capable of securing both current and future digital infrastructures.
 
