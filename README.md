@@ -2,7 +2,7 @@
 
 ### AI-Powered Quantum-Safe Attack Surface Management Platform
 
-🚀 **PSB Cybersecurity Hackathon 2026 Submission**
+🚀 **PNB Cybersecurity Hackathon 2026 Submission**
 👨‍💻 Team: **TCODE**
 🏫 Institute: **IIT Bombay**
 
@@ -97,10 +97,12 @@ AI Risk Scoring
    ↓
 Dashboard + Alerts + Reports
 ```
+<img width="558" height="554" alt="image" src="https://github.com/user-attachments/assets/046112a8-ede1-404a-8ef4-d19856e7ae8d" />
 
 ---
 
 ## 🏗️ Enterprise Architecture
+<img width="442" height="593" alt="image" src="https://github.com/user-attachments/assets/65a80be8-ad2b-4966-b0c4-418c51811308" />
 
 ### 🔹 Layered Architecture
 
@@ -253,17 +255,44 @@ Dashboard + Alerts + Reports
 
 ## 📁 Backend Structure
 
-```
 app/
- ├── models/
- ├── services/
- ├── api/
- ├── scanners/
- ├── pqc/
- ├── db/
-```
-
----
+│
+├── main.py                 # Entry point
+├── config.py               # App configuration
+├── dependencies.py         # Dependency injection
+│
+├── api/                    # API Routes (FastAPI)
+│   └── v1/                 # Versioned APIs
+│
+├── core/                   # Auth, permissions, rate limiting
+│
+├── db/                     # Database connections
+│   ├── postgres.py
+│   ├── neo4j.py
+│   ├── redis.py
+│   ├── clickhouse.py
+│   └── elasticsearch.py
+│
+├── models/                 # Database models (ORM)
+├── schemas/                # Pydantic schemas
+│
+├── services/               # Business logic layer
+│
+├── scanners/               # Security scanning modules
+│   ├── TLS, DNS, Port, API, Vulnerability
+│
+├── ai/                     # AI & Quantum Intelligence
+│   ├── agents/             # AI agents (attack, crypto, pqc)
+│   ├── models/             # ML models
+│   ├── reasoning/          # Attack graph & recommendations
+│   ├── simulators/         # Quantum attack simulations
+│   └── llm/                # LLM routing & prompts
+│
+├── workers/                # Background workers (Kafka आधारित)
+│
+├── utils/                  # Helper utilities
+│
+└── logs/                   # Runtime logs (if enabled)
 
 ## 🔐 Security Features
 
@@ -340,26 +369,219 @@ app/
 
 ---
 
-## 🚀 Deployment
+# ⚙️ Installation & Setup Guide
 
-### Docker
+Follow these steps to run **QuantumSentinel** locally.
+
+---
+
+## 📦 1. Clone Repositories
+
+### Backend
+
+```bash
+git clone https://github.com/Vk9769/quantum-security-backend.git
+cd quantum-security-backend
+```
+
+### Frontend
+
+```bash
+git clone https://github.com/Vk9769/quantum-sentinel.git
+cd quantum-sentinel
+```
+
+---
+
+## 🐍 2. Create Python Virtual Environment (Python 3.11)
+
+```bash
+python3.11 -m venv venv
+```
+
+### Activate:
+
+**Windows**
+
+```bash
+venv\Scripts\activate
+```
+
+**Linux/Mac**
+
+```bash
+source venv/bin/activate
+```
+
+---
+
+## 📥 3. Install Dependencies
+
+```bash
+pip install -r requirements-core.txt
+pip install -r requirements-ai.txt
+```
+
+---
+
+## 🤖 4. Setup AI Models (Ollama)
+
+### Install Ollama
+
+👉 https://ollama.com/download
+
+### Pull Models
+
+```bash
+ollama pull deepseek
+ollama pull mistral
+ollama pull llama3
+```
+
+---
+
+## ⚙️ 5. Environment Configuration
+
+Create a `.env` file in the backend root:
+
+```env
+# PostgreSQL
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=security_db
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=admin
+
+# Redis
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=
+
+# Kafka
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+
+# Neo4j
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=password
+
+# ClickHouse
+CLICKHOUSE_HOST=localhost
+CLICKHOUSE_PORT=8123
+
+# Elasticsearch
+ELASTIC_HOST=http://localhost:9200
+
+# APIs (⚠️ Replace with your own keys)
+CENSYS_API_TOKEN=your_censys_token
+SHODAN_API_KEY=your_shodan_key
+IPINFO_TOKEN=your_ipinfo_token
+VT_API_KEY=your_virustotal_key
+
+# Email
+EMAIL_USER=your_email@gmail.com
+EMAIL_PASS=your_app_password
+```
+
+⚠️ **Security Note:**
+
+* Never push `.env` to GitHub
+* Add `.env` to `.gitignore`
+
+---
+
+## 🐳 6. Start Services using Docker
+
+You already have a `docker-compose.yml`, so run:
 
 ```bash
 docker-compose up --build
 ```
 
-### Local Run
+This will start:
 
-```bash
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
+* PostgreSQL
+* Redis
+* Kafka
+* Neo4j
+* ClickHouse
+* Elasticsearch
 
 ---
 
-## 🎥 Demo
+## 🚀 7. Run Backend
 
-👉 Add your 60-sec video link here
+```bash
+uvicorn app.main:app --reload
+```
+
+Backend will run at:
+👉 http://127.0.0.1:8000
+
+---
+
+## 🎨 8. Run Frontend
+
+```bash
+cd quantum-sentinel
+npm install
+npm run dev
+```
+
+Frontend will run at:
+👉 http://localhost:8080
+
+---
+
+## 🧪 9. Verify Setup
+
+* Open Dashboard → http://localhost:8080
+* Trigger scan on any domain
+* Check:
+
+  * TLS scan results
+  * CBOM data
+  * Risk score
+
+---
+
+## ⚠️ Common Issues & Fixes
+
+### ❌ Ollama not working
+
+```bash
+ollama serve
+```
+
+### ❌ Kafka not connecting
+
+* Ensure Docker containers are running
+* Check `localhost:9092`
+
+### ❌ DB connection error
+
+* Verify `.env` credentials
+* Ensure PostgreSQL container is running
+
+---
+
+## ✅ Final Setup Summary
+
+| Component          | Status |
+| ------------------ | ------ |
+| Backend (FastAPI)  | ✅      |
+| Frontend (React)   | ✅      |
+| AI Models (Ollama) | ✅      |
+| Databases          | ✅      |
+| Docker Services    | ✅      |
+
+---
+
+
+## 🎥 Demo video 
+
+https://drive.google.com/file/d/1fKSD-W6L6430D0kLLTZ6fVG9dz57pcFp/view?usp=sharing
 
 ---
 
