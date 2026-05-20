@@ -83,7 +83,7 @@ for message in consumer:
     last_asset = checkpoint.get("last_asset") if checkpoint else None
 
     # ---------------- FILTER EVENTS ----------------
-    if event_type != "certificate_discovered":
+    if event_type not in ["certificate_discovered", "tls_scan_result", "generate_cbom"]:
         continue
 
     asset = event.get("asset")
@@ -176,10 +176,16 @@ for message in consumer:
         ).order_by(TLSScanResult.scan_time.desc()).first()
 
         tls_data = {
-            "tls_version": tls.tls_version if tls else None,
-            "cipher_suite": tls.cipher_suite if tls else None,
-            "key_exchange": tls.key_exchange if tls else None
-        }
+            "tls_version": (
+                tls.tls_version if tls else event.get("tls_version")
+            ),
+            "cipher_suite": (
+                tls.cipher_suite if tls else event.get("cipher_suite")
+            ),
+            "key_exchange": (
+                tls.key_exchange if tls else event.get("key_exchange")
+            )
+}
 
         # --------------------------------
         # Fetch Certificate
@@ -208,13 +214,14 @@ for message in consumer:
             logger.info(f"⛔ Stopped before CBOM generation → {asset}")
             continue
 
+        logger.info(f"📊 CBOM INPUT → {asset} | TLS={tls_data} | CERT={cert_data}")
         # --------------------------------
         # Generate CBOM (HEAVY)
         # --------------------------------
         cbom_data = generate_cbom(
             asset,
-            tls=tls_data,
-            cert=cert_data
+            tls=tls_data or {},
+            cert=cert_data or {}
         )
 
         # 🔥 CHECK AFTER HEAVY TASK

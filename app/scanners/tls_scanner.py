@@ -58,7 +58,17 @@ def safe_public_key_size(cert):
         return cert.public_key().key_size
     except Exception:
         return None
-
+    
+def normalize_tls_version(result):
+    if result.get("tls_version"):
+        result["tls_version"] = (
+            result["tls_version"]
+            .replace("TLSv1.3", "TLS1.3")
+            .replace("TLSv1.2", "TLS1.2")
+            .replace("TLSv1.1", "TLS1.1")
+            .replace("TLSv1.0", "TLS1.0")
+        )
+    return result
 
 def detect_pqc(value):
     if not value:
@@ -108,7 +118,7 @@ def browser_tls_probe(host):
 
         session.get(
             f"https://{host}",
-            timeout_seconds=10
+            timeout_seconds=15
         )
 
         # tls_client does not reliably expose the raw socket in a portable way.
@@ -717,7 +727,7 @@ def probe_supported_tls_versions(host):
             context.minimum_version = version_obj
             context.maximum_version = version_obj
 
-            with socket.create_connection((host, 443), timeout=5) as sock:
+            with socket.create_connection((host, 443), timeout=8) as sock:
                 with context.wrap_socket(sock, server_hostname=host):
                     supported.append(version_name)
 
@@ -768,11 +778,13 @@ def scan_tls(host):
         try:
             logger.info("Retry TLS with TLS1.2 fallback")
 
-            context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.maximum_version = ssl.TLSVersion.TLSv1_2
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
 
-            with socket.create_connection((host, 443), timeout=5) as sock:
+            with socket.create_connection((host, 443), timeout=8) as sock:
                 with context.wrap_socket(sock, server_hostname=host) as ssock:
                     cipher = ssock.cipher()
 
@@ -789,11 +801,36 @@ def scan_tls(host):
             logger.warning(f"TLS1.2 fallback failed → {host} | {e}")
             
     # 3 OpenSSL enrichment
-    openssl_result = openssl_tls(host)
+    openssl_result = None
+
+    if (
+            not final_result.get("key_exchange")
+            or not final_result.get("signature_algorithm")
+            or not final_result.get("cipher_suite")
+        ):
+        openssl_result = openssl_tls(host)
     if openssl_result:
         logger.info("TLS enrichment via OpenSSL")
         final_result = merge_results(final_result, openssl_result)
 
+    # 🔥 Ensure key_exchange extracted properly (always run)
+    if not final_result.get("key_exchange") and final_result.get("cipher_suite"):
+        cipher = final_result.get("cipher_suite", "")
+
+        if cipher.startswith("TLS_"):
+            final_result["key_exchange"] = "ECDHE (TLS1.3)"
+        elif "-" in cipher:
+            final_result["key_exchange"] = cipher.split("-")[0]
+            
+    # 🚀 EARLY EXIT (avoid heavy scanners like ZGrab/Nmap)
+    if final_result.get("tls_version") and final_result.get("cipher_suite"):
+        final_result["quantum_security"] = detect_pqc(
+            f"{final_result.get('key_exchange', '')} "
+            f"{final_result.get('cipher_suite', '')} "
+            f"{final_result.get('signature_algorithm', '')}"
+        )
+        return normalize_tls_version(final_result)
+    
     # 4 supported protocol versions
     try:
         final_result["supported_tls_versions"] = probe_supported_tls_versions(host)
@@ -801,18 +838,21 @@ def scan_tls(host):
         logger.warning(f"TLS protocol support probe failed → {host} | {e}")
 
     # If we already got strong active results, return now
-    if final_result.get("tls_version") or final_result.get("cipher_suite"):
+    if final_result.get("tls_version") and final_result.get("cipher_suite"):
         final_result["quantum_security"] = detect_pqc(
-                                                f"{final_result.get('key_exchange', '')} "
-                                                f"{final_result.get('cipher_suite', '')} "
-                                                f"{final_result.get('signature_algorithm', '')}"
-                                            )
-        return final_result
+            f"{final_result.get('key_exchange', '')} "
+            f"{final_result.get('cipher_suite', '')} "
+            f"{final_result.get('signature_algorithm', '')}"
+        )
+        
+        return normalize_tls_version(final_result)   # ✅ ADD THIS LINE
 
     # 5 Cloud probe
-    cloud = cloud_tls_probe(host)
-    if cloud:
-        logger.info("Cloud probe succeeded")
+    # Skip cloud probe if already resolved
+    if not final_result.get("tls_version") and not final_result.get("cipher_suite"):
+        cloud = cloud_tls_probe(host)
+        if cloud:
+            logger.info("Cloud probe succeeded")
 
     # 6 ZGrab HTTP TLS
     result = zgrab_http_tls(host)
@@ -820,9 +860,11 @@ def scan_tls(host):
         logger.info("TLS success via ZGrab HTTP")
         final_result = merge_results(final_result, result)
         final_result["quantum_security"] = detect_pqc(
-            f"{final_result.get('key_exchange', '')} {final_result.get('cipher_suite', '')}"
-        )
-        return final_result
+                                            f"{final_result.get('key_exchange', '')} "
+                                            f"{final_result.get('cipher_suite', '')} "
+                                            f"{final_result.get('signature_algorithm', '')}"
+                                        )
+        return normalize_tls_version(final_result)
 
     # 7 ZGrab TLS
     result = zgrab_tls(host)
@@ -830,9 +872,11 @@ def scan_tls(host):
         logger.info("TLS success via ZGrab TLS")
         final_result = merge_results(final_result, result)
         final_result["quantum_security"] = detect_pqc(
-            f"{final_result.get('key_exchange', '')} {final_result.get('cipher_suite', '')}"
-        )
-        return final_result
+                                            f"{final_result.get('key_exchange', '')} "
+                                            f"{final_result.get('cipher_suite', '')} "
+                                            f"{final_result.get('signature_algorithm', '')}"
+                                        )
+        return normalize_tls_version(final_result)
 
     # 8 Nmap SSL enumeration
     tls = nmap_tls_scan(host)
@@ -845,9 +889,12 @@ def scan_tls(host):
             final_result = merge_results(final_result, cert)
 
         final_result["quantum_security"] = detect_pqc(
-            final_result.get("key_exchange") or final_result.get("cipher_suite")
-        )
-        return final_result
+                                            f"{final_result.get('key_exchange', '')} "
+                                            f"{final_result.get('cipher_suite', '')} "
+                                            f"{final_result.get('signature_algorithm', '')}"
+                                        )
+        
+        return normalize_tls_version(final_result)
 
     # 9 Passive lookup (Censys)
     cert = censys_certificate_lookup(host)
@@ -859,7 +906,7 @@ def scan_tls(host):
             "key_exchange": None,
             **cert
         })
-        return final_result
+        return normalize_tls_version(final_result)
 
     # 10 Passive lookup (Shodan)
     cert = shodan_certificate_lookup(host)
@@ -871,7 +918,7 @@ def scan_tls(host):
             "key_exchange": None,
             **cert
         })
-        return final_result
+        return normalize_tls_version(final_result)
 
     # 11 CT logs
     cert = ct_log_certificate_probe(host)
@@ -883,7 +930,7 @@ def scan_tls(host):
             "key_exchange": None,
             **cert
         })
-        return final_result
+        return normalize_tls_version(final_result)
 
     # 12 crt.sh fallback
     cert = crtsh_certificate_probe(host)
@@ -895,11 +942,11 @@ def scan_tls(host):
             "key_exchange": None,
             **cert
         })
-        return final_result
+        return normalize_tls_version(final_result)
 
     logger.error("TLS scan completely failed")
 
-    return {
+    return normalize_tls_version({
         "tls_version": "UNKNOWN",
         "supported_tls_versions": final_result.get("supported_tls_versions", []),
         "cipher_suite": "UNKNOWN",
@@ -914,4 +961,4 @@ def scan_tls(host):
         "public_key_type": None,
         "quantum_security": "CLASSICAL_OR_UNCONFIRMED",
         "browser_probe": final_result.get("browser_probe", False)
-    }
+    })

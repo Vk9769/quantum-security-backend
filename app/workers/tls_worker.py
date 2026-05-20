@@ -110,16 +110,10 @@ for message in consumer:
         event_type = event.get("event_type")
 
         # ✅ FIX: SUPPORT BOTH EVENTS
-        if event_type == "port_open":
-            if event.get("port") != 443:
-                continue
-            asset = event.get("asset")
-
-        elif event_type == "tls_scan_requested":
-            asset = event.get("asset")
-
-        else:
+        if event_type != "tls_scan_requested":
             continue
+
+        asset = event.get("asset")
 
         if not asset:
             logger.warning("TLS event received without asset")
@@ -127,7 +121,7 @@ for message in consumer:
 
         if not scan_id:
             logger.warning(f"⚠ Missing scan_id for TLS → {asset}")
-
+            
         # ==============================
         # CHECKPOINT RESUME LOGIC
         # ==============================
@@ -136,10 +130,10 @@ for message in consumer:
         if checkpoint:
             last_asset = checkpoint.get("last_asset")
 
-            # ❗ Skip ONLY the same asset (avoid reprocessing)
             if asset == last_asset:
                 logger.info(f"⏭ Skipping already processed → {asset}")
                 continue
+
         # ============================================
         # 🔥 CONTROL BEFORE SCAN (CRITICAL)
         # ============================================
@@ -162,77 +156,77 @@ for message in consumer:
         processed_cache.append(processed_key)
         send_log(f"🔐 TLS scan started → {asset}", scan_id)
 
-        # SAVE CHECKPOINT
-        save_checkpoint(
-            scan_id=scan_id,
-            stage="tls_scan",
-            last_asset=asset
-        )
-
         db: Session = SessionLocal()
 
-        # ============================================
-        # 🔥 RUN TLS SCAN (BLOCKING)
-        # ============================================
         try:
-            result = scan_tls(asset)
-        except Exception as e:
-            logger.error(f"TLS scan failed → {asset}")
-            logger.error(e)
-            result = None
+            # ============================================
+            # 🔥 RUN TLS SCAN
+            # ============================================
 
-        # ============================================
-        # 🔥 CONTROL AFTER SCAN
-        # ============================================
-        status = check_scan_control(scan_id)
-
-        if status == "stopped":
-            logger.info(f"⛔ Stopped after TLS scan → {asset}")
-            db.close()
-            continue
-
-        if not result:
-            logger.warning(f"TLS handshake failed → {asset}")
-            send_log(f"❌ TLS handshake failed → {asset}", scan_id)
+            save_checkpoint(
+                scan_id=scan_id,
+                stage="tls_scan",
+                last_asset=asset
+            )
 
             try:
-                graph.add_tls(asset, "UNKNOWN", "UNKNOWN")
+                result = scan_tls(asset)
             except Exception as e:
-                logger.error("Neo4j TLS update failed")
+                logger.error(f"TLS scan failed → {asset}")
                 logger.error(e)
+                result = None
 
-            send_event("tls-events", {
-                "scan_id": scan_id,
-                "event_type": "tls_scan_result",
-                "asset": asset,
-                "tls_version": "UNKNOWN",
-                "cipher_suite": "UNKNOWN",
-                "key_exchange": "UNKNOWN",
-                "certificate_issuer": None,
-                "certificate_subject": None,
-                "signature_algorithm": None,
-                "key_size": None,
-                "expiry": None
-            }, key=asset)
+            # ============================================
+            # 🔥 CONTROL AFTER SCAN
+            # ============================================
 
-            db.close()
-            continue
+            status = check_scan_control(scan_id)
 
-        tls_version = result.get("tls_version")
-        cipher_suite = result.get("cipher_suite")
-        key_exchange = result.get("key_exchange")
+            if status == "stopped":
+                logger.info(f"⛔ Stopped after TLS scan → {asset}")
+                continue
 
-        forward_secrecy = detect_forward_secrecy(
-            tls_version=tls_version,
-            cipher=cipher_suite,
-            key_exchange=key_exchange
-        )
+            if not result:
+                logger.warning(f"TLS handshake failed → {asset}")
+                send_log(f"❌ TLS handshake failed → {asset}", scan_id)
 
-        try:
+                try:
+                    graph.add_tls(asset, "UNKNOWN", "UNKNOWN")
+                except Exception as e:
+                    logger.error("Neo4j TLS update failed")
+                    logger.error(e)
+
+                send_event("tls-events", {
+                    "scan_id": scan_id,
+                    "event_type": "tls_scan_result",
+                    "asset": asset,
+                    "tls_version": "UNKNOWN",
+                    "cipher_suite": "UNKNOWN",
+                    "key_exchange": "UNKNOWN",
+                    "certificate_issuer": None,
+                    "certificate_subject": None,
+                    "signature_algorithm": None,
+                    "key_size": None,
+                    "expiry": None
+                }, key=asset)
+
+                continue
+
+            # ============================================
+            # 🔥 DB OPERATIONS
+            # ============================================
+
+            tls_version = result.get("tls_version")
+            cipher_suite = result.get("cipher_suite")
+            key_exchange = result.get("key_exchange")
+
+            forward_secrecy = detect_forward_secrecy(
+                tls_version, cipher_suite, key_exchange
+            )
+
             asset_record = None
 
             for _ in range(3):
-
                 status = check_scan_control(scan_id)
 
                 if status == "stopped":
@@ -253,7 +247,7 @@ for message in consumer:
                 time.sleep(2)
 
             if not asset_record:
-                send_log(f"⚠ Asset not found for TLS result → {asset}", scan_id)
+                send_log(f"⚠ Asset not found → {asset}", scan_id)
                 continue
 
             existing = db.query(TLSScanResult).filter(
@@ -266,32 +260,27 @@ for message in consumer:
                 existing.key_exchange = key_exchange
                 existing.forward_secrecy = forward_secrecy
                 existing.scan_time = datetime.now(UTC)
-
             else:
-                tls_result = TLSScanResult(
+                db.add(TLSScanResult(
                     asset_id=asset_record.id,
                     tls_version=tls_version,
                     cipher_suite=cipher_suite,
                     key_exchange=key_exchange,
                     forward_secrecy=forward_secrecy,
                     scan_time=datetime.now(UTC)
-                )
-
-                db.add(tls_result)
+                ))
 
             db.commit()
 
             try:
                 graph.add_tls(asset, tls_version, cipher_suite)
             except Exception as e:
-                logger.error("Neo4j TLS update failed")
                 logger.error(e)
 
         except Exception as e:
             db.rollback()
-            logger.error(f"Failed to store TLS result → {asset}")
+            logger.error(f"DB error → {asset}")
             logger.error(e)
-            send_log(f"❌ Failed to store TLS result → {asset}", scan_id)
 
         finally:
             db.close()
@@ -309,6 +298,21 @@ for message in consumer:
             "key_size": result.get("key_size"),
             "expiry": result.get("expiry"),
             "forward_secrecy": forward_secrecy
+        }, key=asset)
+        
+        # 🔥 TRIGGER CBOM GENERATION
+        send_event("certificate-events", {
+            "scan_id": scan_id,
+            "event_type": "tls_scan_result",
+            "asset": asset,
+            "tls_version": tls_version,
+            "cipher_suite": cipher_suite,
+            "key_exchange": key_exchange,
+            "signature_algorithm": result.get("signature_algorithm"),
+            "certificate_issuer": result.get("certificate_issuer"),
+            "certificate_subject": result.get("certificate_subject"),
+            "key_size": result.get("key_size"),
+            "expiry": result.get("expiry")
         }, key=asset)
         
         # 🔥 TRIGGER AI RISK ANALYSIS
@@ -329,4 +333,4 @@ for message in consumer:
     except Exception as e:
         logger.error("❌ TLS worker crashed")
         logger.error(e)
-        send_log(f"❌ TLS scan failed → {asset}", scan_id)
+        send_log(f"❌ TLS scan failed → {event.get('asset')}", scan_id)

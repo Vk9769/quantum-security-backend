@@ -15,6 +15,8 @@ def parse_json_safe(value):
 from app.db.postgres import get_db
 from app.models.ai_agent_results import AIAgentResult
 from app.models.asset_registry import AssetRegistry
+from app.ai.llm.model_client import generate_ai_response
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -814,4 +816,22 @@ def get_ai_agents(
         "scan_id": scan_id,
         "source": "current",
         "data": list(agents_map.values())
+    }
+    
+# ============================================
+# 5️⃣ AI CHATBOT
+# ============================================
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+@router.post("/ai/chat")
+async def ai_chat(req: ChatRequest):
+
+    response = await generate_ai_response(req.message)
+
+    return {
+        "success": True,
+        "response": response
     }

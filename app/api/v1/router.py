@@ -21,6 +21,7 @@ from app.api.v1.certificate_map_routes import router as certificate_map_router
 from app.api.v1.scan_history_routes import router as scan_history_router
 from app.api.v1.ai_routes import router as ai_router
 from app.api.v1.alert_routes import router as alert_router
+from app.api.v1.pqc_badge import router as pqc_badge_router
 
 # SERVICES
 from app.db.postgres import engine
@@ -138,3 +139,4 @@ router.include_router(certificate_map_router, prefix="/map", tags=["Map"])
 router.include_router(scan_history_router, tags=["Scan History"])
 router.include_router(ai_router, tags=["AI Analysis"])
 router.include_router(alert_router, tags=["Alerts"])
+router.include_router(pqc_badge_router, tags=["PQC Badge"])

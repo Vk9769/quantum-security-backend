@@ -2,7 +2,7 @@ import json
 import logging
 import time
 import threading
-
+import socket
 from kafka import KafkaConsumer
 from sqlalchemy.orm import Session
 
@@ -222,16 +222,18 @@ def run_port_scan(asset, scan_id, organization_id):
             )
 
             # ✅ FIX: Trigger TLS ONLY if port 443 exists
-            if 443 in ports:
-                send_event("tls-events", {
-                    "event_type": "tls_scan_requested",
-                    "scan_id": scan_id,
-                    "organization_id": organization_id,
-                    "asset": asset
-                })
-                logger.info(f"🚀 TLS scan triggered → {asset}")
-            else:
-                logger.warning(f"⚠ Skipping TLS → No HTTPS port → {asset}")
+            # 🔥 ALWAYS TRY TLS (even if port scan misses)
+            try:
+                with socket.create_connection((asset, 443), timeout=3):
+                    send_event("tls-events", {
+                        "event_type": "tls_scan_requested",
+                        "scan_id": scan_id,
+                        "organization_id": organization_id,
+                        "asset": asset
+                    })
+                    logger.info(f"🚀 TLS scan triggered (forced) → {asset}")
+            except:
+                logger.warning(f"⚠ TLS not reachable → {asset}")
 
             # OPTIONAL (unchanged)
             send_event("service-events", {

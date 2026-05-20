@@ -1,0 +1,188 @@
+Folder PATH listing for volume OS
+Volume serial number is 564C-A024
+C:\QUANTUM-SECURITY-BACKEND\APP
+|   config.py
+|   dependencies.py
+|   main.py
+|   
++---ai
+|   |   anomaly_detector.py
+|   |   feature_store.py
+|   |   intent_detector.py
+|   |   quantum_risk_analyzer.py
+|   |   risk_model.py
+|   |   
+|   +---actions
+|   |   |   scan_action.py
+|   |   |   
+|   |           
+|   +---agents
+|   |   |   attack_agent.py
+|   |   |   crypto_agent.py
+|   |   |   orchestrator_agent.py
+|   |   |   pqc_agent.py
+|   |   |   report_agent.py
+|   |   |   scan_agent.py
+|   |   |   
+|   |           
+|   +---llm
+|   |   |   llm_router.py
+|   |   |   model_client.py
+|   |   |   prompts.py
+|   |   |   
+|   |           
+|   +---models
+|   |   |   anomaly_model.py
+|   |   |   risk_predictor.py
+|   |   |   
+|   |           
+|   +---reasoning
+|   |   |   attack_graph_builder.py
+|   |   |   pqc_recommender.py
+|   |   |   
+|   |           
+|   +---simulators
+|   |   |   grover_simulator.py
+|   |   |   mitm_simulator.py
+|   |   |   shor_simulator.py
+|   |   |   tls_downgrade_simulator.py
+|   |   |   
+|   |           
+|           
++---api
+|   \---v1
+|       |   ai_routes.py
+|       |   alert_routes.py
+|       |   asset_routes.py
+|       |   auth_routes.py
+|       |   cbom_routes.py
+|       |   certificate_map_routes.py
+|       |   drift_routes.py
+|       |   employee_routes.py
+|       |   otp_routes.py
+|       |   pqc_badge.py
+|       |   pqc_routes.py
+|       |   report_routes.py
+|       |   risk_routes.py
+|       |   router.py
+|       |   scan_history_routes.py
+|       |   scan_routes.py
+|       |   search_routes.py
+|       |   tls_analytics.py
+|       |   tls_routes.py
+|       |   topology_routes.py
+|       |   vulnerability_routes.py
+|       |   
+|               
++---core
+|   |   auth.py
+|   |   permissions.py
+|   |   rate_limiter.py
+|   |   
+|           
++---db
+|   |   clickhouse.py
+|   |   elasticsearch.py
+|   |   neo4j.py
+|   |   postgres.py
+|   |   redis.py
+|   |   
+|           
++---models
+|   |   ai_agent_results.py
+|   |   alert.py
+|   |   asset.py
+|   |   asset_registry.py
+|   |   cbom.py
+|   |   certificate.py
+|   |   employee.py
+|   |   event_stream.py
+|   |   organization.py
+|   |   pqc.py
+|   |   risk.py
+|   |   scan.py
+|   |   scan_deltas.py
+|   |   scan_events.py
+|   |   scan_jobs.py
+|   |   tls.py
+|   |   topology.py
+|   |   user.py
+|   |   vulnerability.py
+|   |   __init__.py
+|   |   
+|           
++---scanners
+|   |   api_discovery.py
+|   |   asn_scanner.py
+|   |   cbom_generator.py
+|   |   certificate_scanner.py
+|   |   ct_monitor.py
+|   |   dns_scanner.py
+|   |   port_scanner.py
+|   |   reverse_dns_scanner.py
+|   |   service_detector.py
+|   |   subdomain_scanner.py
+|   |   tls_scanner.py
+|   |   vulnerability_scanner.py
+|   |   waf_detector.py
+|   |   
+|           
++---schemas
+|   |   alert_schema.py
+|   |   asset_schema.py
+|   |   employee_schema.py
+|   |   pqc_schema.py
+|   |   risk_schema.py
+|   |   scan_schema.py
+|   |   topology_schema.py
+|   |   user_schema.py
+|   |   vulnerability_schema.py
+|   |   
+|           
++---services
+|   |   ai_agent_service.py
+|   |   alert_service.py
+|   |   asset_service.py
+|   |   clickhouse_service.py
+|   |   graph_service.py
+|   |   pqc_service.py
+|   |   report_service.py
+|   |   risk_service.py
+|   |   scan_service.py
+|   |   tls_service.py
+|   |   topology_service.py
+|   |   vulnerability_service.py
+|   |   
+|           
++---utils
+|   |   checkpoint.py
+|   |   crypto_utils.py
+|   |   dns_resolver.py
+|   |   email_utils.py
+|   |   logger.py
+|   |   log_streamer.py
+|   |   runtime_control.py
+|   |   scan_control.py
+|   |   security.py
+|   |   validators.py
+|   |   websocket_manager.py
+|   |   
+|           
++---workers
+|   |   alert_worker.py
+|   |   cbom_worker.py
+|   |   certificate_worker.py
+|   |   kafka_consumer.py
+|   |   kafka_producer.py
+|   |   log_consumer.py
+|   |   orchestrator_worker.py
+|   |   port_scan_worker.py
+|   |   risk_worker.py
+|   |   scan_worker.py
+|   |   subdomain_worker.py
+|   |   tls_worker.py
+|   |   vulnerability_worker.py
+|   |   worker_manager.py
+|   |   
+|           
+        

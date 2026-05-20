@@ -2,8 +2,8 @@ import subprocess
 import socket
 import logging
 import re
-import dns.resolver
 import xml.etree.ElementTree as ET
+from app.utils.dns_resolver import resolve_all_ips
 
 logger = logging.getLogger("PortScanner")
 
@@ -13,16 +13,14 @@ logger = logging.getLogger("PortScanner")
 # -----------------------------------
 
 def resolve_host(host):
-    try:
-        answers = dns.resolver.resolve(host, "A", lifetime=5)
-        ips = [a.to_text() for a in answers]
+    ips = resolve_all_ips(host)
 
+    if ips:
         logger.info(f"Resolved {host} → {ips}")
-        return ips
+    else:
+        logger.warning(f"DNS resolution failed → {host}")
 
-    except Exception as e:
-        logger.warning(f"DNS resolution failed → {host} | {e}")
-        return []
+    return ips
 
 
 # -----------------------------------
@@ -77,22 +75,39 @@ def masscan_scan(ip):
 def python_fallback(ip):
 
     COMMON_PORTS = [
-        21,22,25,53,80,110,143,443,
-        3306,5432,6379,8080,8443
+        443, 80, 22, 21, 25, 53,
+        110, 143, 3306, 5432,
+        6379, 8080, 8443
     ]
 
     open_ports = []
 
     for port in COMMON_PORTS:
+
+        success = False
+
+        for _ in range(2):  # 🔁 retry
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(3)   # 🔥 increased timeout
+                    result = sock.connect_ex((ip, port))
+
+                    if result == 0:
+                        success = True
+                        break
+            except:
+                pass
+
+        if success:
+            open_ports.append(port)
+
+    # 🔥 FORCE HTTPS DETECTION (CRITICAL FIX)
+    if 443 not in open_ports:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(1)
-                result = sock.connect_ex((ip, port))
-
-                if result == 0:
-                    open_ports.append(port)
-
-        except Exception:
+            with socket.create_connection((ip, 443), timeout=3):
+                open_ports.append(443)
+                logger.info(f"Forced detect → 443 open → {ip}")
+        except:
             pass
 
     return open_ports
@@ -230,6 +245,15 @@ def scan_ports(host):
 
         # ✅ ONLY FAST PYTHON SCAN (NO DOCKER)
         ports = python_fallback(ip)
+
+        # 🔥 validate real service
+        validated_ports = []
+
+        for p in ports:
+            if validate_real_service(ip, p):
+                validated_ports.append(p)
+
+        ports = validated_ports
 
         logger.info(f"⚡ Ports found → {ip} → {ports}")
 

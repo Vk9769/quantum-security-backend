@@ -2,6 +2,7 @@ import socket
 import ipaddress
 import logging
 from typing import List, Optional
+from app.utils.dns_resolver import resolve_domain
 
 logger = logging.getLogger("ReverseDNS")
 
@@ -38,18 +39,12 @@ def reverse_dns(prefix: str) -> List[str]:
 
 
 def resolve_ip(host: str) -> Optional[str]:
-    """
-    Resolve hostname to IPv4 address.
-    Example:
-        resolve_ip("example.com") -> "93.184.216.34"
-    """
-    try:
-        ip = socket.gethostbyname(host)
-        return ip
-    except Exception as e:
-        logger.warning(f"Host to IP resolution failed → {host} | {e}")
-        return None
+    ip = resolve_domain(host)
 
+    if not ip:
+        logger.warning(f"Host to IP resolution failed → {host}")
+
+    return ip
 
 def reverse_dns_lookup(host_or_ip: str) -> Optional[str]:
     """

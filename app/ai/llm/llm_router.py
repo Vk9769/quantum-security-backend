@@ -3,6 +3,9 @@ import time
 
 from langchain_community.llms import Ollama
 
+from app.ai.intent_detector import detect_scan_intent
+from app.ai.actions.scan_action import execute_scan
+
 logger = logging.getLogger("LLMRouter")
 
 
@@ -90,12 +93,23 @@ class LLMRouter:
     # -----------------------------------
     # Public method
     # -----------------------------------
-    def run(self, task: str, prompt: str) -> str:
+    async def run(self, task: str, prompt: str):
 
         if not prompt:
             return "No prompt provided"
 
         logger.info(f"🧠 LLM Task → {task}")
+
+        # -----------------------------------
+        # AI Scan Intent Detection
+        # -----------------------------------
+        intent = detect_scan_intent(prompt)
+
+        if intent:
+
+            logger.info(f"🚀 Scan intent detected → {intent['domain']}")
+
+            return await execute_scan(intent["domain"])
 
         # -----------------------------------
         # Attack reasoning

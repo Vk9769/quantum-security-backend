@@ -4,6 +4,7 @@ import logging
 import socket
 import ipaddress
 from typing import Optional, List, Dict, Any
+from app.utils.dns_resolver import resolve_domain
 
 logger = logging.getLogger("ASNScanner")
 
@@ -31,13 +32,14 @@ def is_ip(value: str) -> bool:
 
 
 def resolve_ip(domain: str) -> Optional[str]:
-    try:
-        ip = socket.gethostbyname(domain)
+    ip = resolve_domain(domain)
+
+    if ip:
         logger.info(f"Resolved {domain} → {ip}")
-        return ip
-    except Exception as e:
-        logger.warning(f"DNS resolution failed → {domain} | {e}")
-        return None
+    else:
+        logger.warning(f"DNS resolution failed → {domain}")
+
+    return ip
 
 
 def clear_ipinfo_cache():

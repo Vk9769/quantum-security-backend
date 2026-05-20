@@ -1,3 +1,12 @@
+import asyncio
+import platform
+
+# ✅ FIX PLAYWRIGHT WINDOWS ISSUE
+if platform.system() == "Windows":
+    asyncio.set_event_loop_policy(
+        asyncio.WindowsProactorEventLoopPolicy()
+    )
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv

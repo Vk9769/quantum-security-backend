@@ -8,6 +8,7 @@ import ipaddress
 
 from app.scanners.asn_scanner import get_asn, get_asn_prefixes
 from app.scanners.reverse_dns_scanner import reverse_dns
+from app.utils.dns_resolver import resolve_domain
 
 logger = logging.getLogger("SubdomainScanner")
 
@@ -23,11 +24,6 @@ def is_ip(target):
     except:
         return False
     
-def resolve_ip(hostname):
-    try:
-        return socket.gethostbyname(hostname)
-    except Exception:
-        return None
 
 
 # -----------------------------
@@ -229,7 +225,7 @@ def discover_subdomains(target):
 
     # Resolve IPs
     for sub in sorted(found):
-        ip = resolve_ip(sub)
+        ip = resolve_domain(sub)
         results.append({
             "subdomain": sub,
             "ip_address": ip
